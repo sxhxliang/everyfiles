@@ -170,6 +170,20 @@ pub trait Scanner: Send + Sync {
 
 路径重建只对最终那一页进行。
 
+### 5.4 拼音匹配（特性 `pinyin`）
+
+代码位于 `crates/core/src/pinyin/`，由 `everyfiles-core` 的可选特性 `pinyin` 门控：库里默认关闭，CLI 默认打开，`--pinyin` 旗标随之出现（`--no-default-features` 构建的 CLI 没有这个旗标）。读音数据来自 `pinyin` crate（pinyin-data 0.15，约 4.17 万字，含多音字）。它带一个纯 Rust 的 `build.rs`，只用来生成读音表，没有 C 代码，所以不影响 `xcheck`。
+
+**语义。** 查询串按字节逐个消耗名字里**相邻**的字符，每个字符至少消耗一个字母，起点可以在名字任何位置。ASCII 字符只能被它自己消耗；汉字可以被它任一读音的**任意前缀**消耗（`p`、`pi`、`pin` 都能消耗“拼”），也可以被查询串里相同的汉字整体消耗。于是 `pysousuoeve` 匹配 `拼音搜索Everything`（p 拼、y 音、sou 搜、suo 索、e v e），`sousuo` 可以从 `我的搜索工具` 的中间开始，但 `pyev` 不匹配——字符不能被跳过。对纯 ASCII 名字这恰好退化成子串匹配，这一点由测试保证。`ü` 既接受 `v` 也接受 `u`（`nv`、`nu` 都匹配“女”）；多音字每个读音都算（`chongqing`、`zhongqing` 都匹配“重庆”）；没有读音的字符（emoji、假名、西里尔字母）只能被自身匹配；非法 UTF-8 字节被跳过而不是变成替换字符。`--exact` 要求整个名字被覆盖；`--case-sensitive` 和通配符与之互斥，`Query::validate()` 直接拒绝而不是悄悄改语义。
+
+**匹配器**（`pinyin/mod.rs`）是位并行的：查询串每个字节位置一个比特，“从位置 p 消耗某读音的前 l 个字节”是一次 `AND` 加一次移位，每个字符把它所有读音（和它自身）的结果 `OR` 起来；比特 0 在非精确模式下每个字符都重新点亮，表示“从这里开始”。127 字节以内的查询用一个 `u128`，更长的走逐位置的回退实现。每条记录不分配内存：读音写进栈上的定长缓冲区。
+
+**索引层**（`pinyin/search.rs`）不对每条记录都跑 DP。没有任何 ≥ 0x80 字节的名字不可能含汉字，它的答案就是普通子串扫描的答案，所以先用 `memmem` 扫一遍折叠池得到子串命中，再用一遍 8 字节步进的 SWAR 扫描找出含高位字节的记录（按块并行，命中偏移像子串扫描一样线性映射回 id），只对后者跑 DP，最后把两个有序 id 列表合并。精确模式没有子串快路径，DP 跑全部记录，但绝大多数记录在第一个字符就死掉了。
+
+**代价。** 纯 ASCII 的 100 万条索引上，拼音查询比同一 needle 的子串查询多约 0.5 ms，就是那遍高位字节扫描；20 万条全中文名字的索引约 3.5～4.4 ms，即跨核心约 20 ns/条，推算 100 万条全中文约 20 ms。见 `docs/benchmarks.zh-CN.md` 3.5 节。
+
+**测试。** `pinyin::tests` 把匹配器与一个按定义写的回溯参考实现在小字母表上穷举比对（名字 ≤ 3 个字符，查询 ≤ 3 个元素，元素含整字的汉字，两种模式都比），正是这个测试抓到过“整字备选只消耗了第一个字节”的错误；`search::tests::the_two_paths_agree` 把“子串扫描 + 高位字节扫描 + DP”的分派结果与对每条记录直接跑 DP 的结果比对。公开 API 是 `pinyin::matches(needle, haystack)`（及其别名 `拼音_匹配`），索引路径用 `pinyin::Matcher` 直接吃 `Index::folded`。
+
 ## 6. 持久化格式
 
 代码位于 `crates/core/src/store/`。
@@ -323,7 +337,7 @@ pub trait Watcher: Send {
 ```
 everyfiles index  <path> [--max-depth N] [--json]
 everyfiles search <query> --root <path> [--limit N] [--offset N] [--sort name|size|mtime|path] [--desc]
-                  [--files-only|--dirs-only] [--case-sensitive] [--exact]
+                  [--files-only|--dirs-only] [--case-sensitive] [--exact] [--pinyin]
                   [--min-size 10K] [--max-size 4M] [--after -7d] [--before 2024-02-29]
                   [--hidden] [-o human|tsv|jsonl|json|null] [--stat] [--force-rescan] [--no-verify]
 everyfiles watch  <path> [--debounce-ms 500] [--save-every 30] [--no-sweep] [--once]
@@ -351,7 +365,8 @@ everyfiles backends
 - **差分对照测试**：最重要的一类。用某个后端建索引，与 `naive_scan` 比对存活路径集合和元数据；再通过监听器施加一串变更（创建、删除、重命名、删子树），断言索引与一次全新扫描一致。每个后端在自己平台上跑，`everyfiles verify` 复用同一份代码。
 - **纯内存测试**：`SyntheticScanner` 是可变的内存树，实现了 `Scanner` 的全部方法（包括 `stat_entry`），所以装配、更新、sweep、压缩都能在没有文件系统的情况下测试。它放在 core 的 `testing` 特性下而不是 testkit 里，是为了避免开发依赖环导致 trait 出现两个实例。
 - **内存测试**：`tests/memory.rs` 用计数全局分配器测量 100 万条记录的真实占用，断言落在 `33 × n + 名字池` 加一块粒度的松弛范围内，并要求 `approx_bytes()` 的自报数字与实测相差不超过 5%。
-- **基准**：`benches/query.rs`（各类 needle 的查询延迟）、`benches/store.rs`（保存、加载、加载并校验）。
+- **基准**：`benches/query.rs`（各类 needle 的查询延迟；带 `--features pinyin` 时再加一个 20 万条中文名字的索引和纯 ASCII 索引上的拼音查询）、`benches/store.rs`（保存、加载、加载并校验）。
+- **拼音测试**：见 5.4 节——匹配器与回溯参考实现的穷举比对，以及索引层两条路径的比对。
 
 ### 10.2 跨平台类型检查
 
@@ -363,12 +378,13 @@ cargo xtask xcheck
 
 ### 10.3 CI
 
-`.github/workflows/ci.yml`：`fmt` + `clippy -D warnings`；在 ubuntu / macos-14 / windows 上跑 `cargo test --workspace` 和 `verify`；Linux 上额外以 `sudo` 运行 `#[ignore]` 的 `root_*` fanotify 测试；macOS 上跑 `xcheck`；基准编译并各跑一次。
+`.github/workflows/ci.yml`：`fmt` + `clippy -D warnings`（默认特性与 `--all-features` 各一次）；在 ubuntu / macos-14 / windows 上跑 `cargo test --workspace`（默认与 `--all-features` 各一次）和 `verify`；Linux 上额外以 `sudo` 运行 `#[ignore]` 的 `root_*` fanotify 测试；macOS 上跑 `xcheck`；基准编译并各跑一次。
 
 ## 11. 开发约定
 
 - **core 不碰平台**：不加 `cfg(target_os)`，不加平台 crate，不做文件系统 I/O。
-- **不引入带 C 构建脚本的依赖**，否则 `xcheck` 失败（`blake3` 因此被 `xxhash-rust` 取代）。优先 `rustix`，只有没有合适纯 Rust 绑定时才手写 FFI（FSEvents、fanotify）。
+- **不引入带 C 构建脚本的依赖**，否则 `xcheck` 失败（`blake3` 因此被 `xxhash-rust` 取代）。纯 Rust 的构建脚本可以接受（`pinyin` crate 用它生成读音表）。优先 `rustix`，只有没有合适纯 Rust 绑定时才手写 FFI（FSEvents、fanotify）。
+- **可选特性加在 core 上并默认关闭**（目前只有 `pinyin`），门面原样转发，CLI 可以默认打开。注意 `cargo test --workspace` 会因为 CLI 把它统一打开，单独测 core 要加 `--features pinyin`。
 - **每个 `unsafe` 块都有 `// SAFETY:` 注释**写明依赖的不变量。内核缓冲区一律在字节切片上做边界检查后解析，用 `read_unaligned` 读值，不把缓冲区强转为结构体引用。
 - **平台常量来自 SDK 头文件或内核 UAPI 并注明来源**，不凭记忆。`libc` 缺 `ATTR_CMN_ERROR`、`fsobj_type_t` 取值和大部分 `FAN_*`，所以一些常量在本地声明。
 - **能力如实上报**：`ScanCaps::provides_size/mtime` 和 `HAS_SIZE/HAS_MTIME` 必须反映后端真正提供了什么；`probe()` 要说明当前生效的路径和降级原因。
@@ -384,6 +400,8 @@ cargo xtask xcheck
 | 约 100 万条合成记录的索引 | 常驻 65 MiB |
 | 查询（100 万条，典型 needle） | 0.2 ～ 1 ms |
 | 查询（100 万条，单字母命中 49 万条） | 3.2 ms |
+| 拼音查询（同一 100 万条纯 ASCII 索引，不跑 DP） | `report` 1.5 ms、无命中 0.5 ms（子串为 1.0 / 0.15 ms） |
+| 拼音查询（20 万条全中文名字，每条都过 DP） | 3.5～4.4 ms（跨核心约 20 ns/条） |
 | 加载 100 万条索引（66 MB 文件） | 0.26 ms（零拷贝 mmap） |
 | 加载并校验负载哈希 | 6.6 ms |
 | 保存 100 万条 | 26 ～ 57 ms |
@@ -392,7 +410,7 @@ cargo xtask xcheck
 
 ## 13. 已知缺口与后续工作
 
-**刻意的缺口**（见 README "Known gaps"）：Linux 默认只索引名字；Windows 未实现 USN 整卷枚举；macOS 的 TCC 与 firmlink 行为；inotify watch 配额；只做简单大小写折叠；不支持正则；无字面量段的通配模式走慢路径；mtime sweep 看不到未变动目录内的文件 size 变化。
+**刻意的缺口**（见 README "Known gaps"）：Linux 默认只索引名字；Windows 未实现 USN 整卷枚举；macOS 的 TCC 与 firmlink 行为；inotify watch 配额；只做简单大小写折叠；不支持正则；无字面量段的通配模式走慢路径；mtime sweep 看不到未变动目录内的文件 size 变化；拼音匹配是读音前缀而非模糊匹配，全中文索引每条记录都要过 DP。
 
 **计划中但未做的优化**（都不影响正确性，按真实语料的剖析结果决定是否做）：
 

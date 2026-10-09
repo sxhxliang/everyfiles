@@ -11,6 +11,7 @@
 //! - [`scan`] — the backend seam and the parallel tree assembler.
 //! - [`query`] — matching, filtering, sorting, path reconstruction.
 //! - [`fold`] — case folding shared by ingest and query.
+//! - [`pinyin`] — pinyin matching for Han-character names (feature `pinyin`).
 //! - [`store`] — the on-disk format, zero-copy load, atomic save.
 //! - [`engine`] — open an index, apply incremental updates, drive a watcher.
 //! - [`watch`] — the change-notification seam.
@@ -22,6 +23,8 @@ pub mod engine;
 pub mod error;
 pub mod fold;
 pub mod index;
+#[cfg(feature = "pinyin")]
+pub mod pinyin;
 pub mod platform;
 pub mod query;
 pub mod scan;

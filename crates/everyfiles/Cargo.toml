@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 description = "Public facade: engine re-exports plus the backend registry"
 
+[features]
+## Pinyin matching: `everyfiles::pinyin` and `Query::pinyin`.
+pinyin = ["everyfiles-core/pinyin"]
+
 [dependencies]
 everyfiles-core.workspace = true
 everyfiles-backend-generic.workspace = true

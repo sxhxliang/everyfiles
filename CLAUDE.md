@@ -22,6 +22,8 @@ cargo xtask xcheck                                      # cross-target type chec
 cargo bench -p everyfiles-core                          # criterion: benches/query.rs, benches/store.rs
 cargo run --release -p everyfiles-cli -- verify <dir>   # differential check vs naive walk
 cargo test -p everyfiles-core --lib query::             # one module's tests
+cargo test --workspace --all-features                   # pinyin feature too (CI runs both)
+cargo bench -p everyfiles-core --features pinyin --bench query -- pinyin
 ```
 
 CI (`.github/workflows/ci.yml`): fmt + clippy; `cargo test --workspace` and
@@ -48,6 +50,10 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   - `query/` — `search` (pool scan + offset merge in `matcher.rs`; whole-name
     globs in `glob.rs`, prefiltered by their longest literal run), filters,
     `sort_ids`, `truncate_top` (select_nth), `page`.
+  - `pinyin/` (feature `pinyin`) — `Matcher`, a bit-parallel
+    prefix-of-reading DP over one folded name (`mod.rs`), and the index
+    search that answers names with no high byte from the SIMD scan and runs
+    the DP only on the rest (`search.rs`). Readings from the `pinyin` crate.
   - `store/` — on-disk format (`header.rs`), atomic `save` (`write.rs`),
     zero-copy `load` (`load.rs`). xxh3 checksums.
   - `engine/` — `open` (load if fresh else rescan+save, with the spot-check),
@@ -84,7 +90,8 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   (criterion's `alloca` is why xcheck checks `core` with `--lib` only; the
   backends are also checked with `--tests`). Prefer `rustix` over
   `libc` where it covers the call; hand-declare FFI only where no pure-Rust
-  binding is adequate (FSEvents, fanotify).
+  binding is adequate (FSEvents, fanotify). A pure-Rust build script is
+  fine: the optional `pinyin` crate generates its reading table with one.
 
 ## Verification model
 
@@ -116,6 +123,9 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   re-list of every directory on every sweep. On NTFS the parent listing's copy
   (`FindFirstFile`, `FILE_ID_BOTH_DIR_INFO`) is refreshed lazily, which is why
   both Windows-capable scanners re-stat subdirectories.
+- The `pinyin` feature is off by default in `core` and the facade and on by
+  default in the CLI, so `cargo test --workspace` already unifies it on;
+  `cargo test -p everyfiles-core` needs `--features pinyin` to cover it.
 - Keep `core` free of filesystem I/O; even root validation goes through
   `Scanner::root_info`, which is why the synthetic scanner can test everything.
 - Tests that scan with `SyntheticScanner` / `GeneratedScanner` must take the

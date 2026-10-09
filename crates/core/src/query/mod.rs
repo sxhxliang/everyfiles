@@ -10,9 +10,11 @@
 //! scanned on the calling thread so a tiny query never pays for a thread pool.
 //! A needle containing `*` or `?` is matched as a whole-name glob instead
 //! (see [`glob`]), prefiltered by the longest literal run in the pattern.
+//! With the `pinyin` feature, [`Query::pinyin`] reads the needle as a pinyin
+//! pattern over Han characters instead (see [`crate::pinyin`]).
 
 mod glob;
-mod matcher;
+pub(crate) mod matcher;
 
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,11 @@ pub struct Query {
     pub case_sensitive: bool,
     /// Whole-name match instead of substring.
     pub exact: bool,
+    /// Read the needle as a pinyin pattern (feature `pinyin`): each ASCII
+    /// letter matches an ASCII character of the name or part of a Han
+    /// character's reading. Always case-insensitive, and never a glob.
+    #[cfg(feature = "pinyin")]
+    pub pinyin: bool,
     pub kind: KindFilter,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
@@ -76,6 +83,19 @@ impl Query {
         {
             return Err(Error::Query("--min-size is greater than --max-size".into()));
         }
+        #[cfg(feature = "pinyin")]
+        if self.pinyin {
+            if self.case_sensitive {
+                return Err(Error::Query(
+                    "--pinyin matches case-insensitively; drop --case-sensitive".into(),
+                ));
+            }
+            if glob::has_wildcards(self.needle.as_bytes()) {
+                return Err(Error::Query(
+                    "--pinyin cannot be combined with * or ?".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -88,12 +108,21 @@ pub struct Matches {
 }
 
 /// Below this many records, scan sequentially rather than spin up rayon.
-const PAR_THRESHOLD: usize = 32 * 1024;
+pub(crate) const PAR_THRESHOLD: usize = 32 * 1024;
 
 /// Run a query, returning every matching record id (the root is never a result).
 pub fn search(index: &Index, q: &Query) -> Result<Matches> {
     q.validate()?;
     let start = Instant::now();
+    let ids = match_ids(index, q);
+    Ok(Matches {
+        ids,
+        elapsed: start.elapsed(),
+    })
+}
+
+/// The match itself, once the query is known to be answerable.
+fn match_ids(index: &Index, q: &Query) -> Vec<Id> {
     let needle: Vec<u8> = if q.case_sensitive {
         q.needle.as_bytes().to_vec()
     } else {
@@ -102,9 +131,14 @@ pub fn search(index: &Index, q: &Query) -> Result<Matches> {
     let pred = |id: Id| passes_filters(index, q, id);
     let n = index.len() as Id;
 
-    let ids: Vec<Id> = if needle.is_empty() {
-        filter_all(n, &pred)
-    } else if glob::has_wildcards(&needle) {
+    if needle.is_empty() {
+        return filter_all(n, &pred);
+    }
+    #[cfg(feature = "pinyin")]
+    if q.pinyin {
+        return crate::pinyin::search(index, q);
+    }
+    if glob::has_wildcards(&needle) {
         // A whole-name glob. `exact` is implied and ignored. A literal run of
         // two or more bytes in the pattern must appear verbatim in any match,
         // so it is a sound prefilter; without one, every record is tested.
@@ -156,11 +190,7 @@ pub fn search(index: &Index, q: &Query) -> Result<Matches> {
             index.fold_view()
         };
         matcher::scan_pool(&view, &needle, pred)
-    };
-    Ok(Matches {
-        ids,
-        elapsed: start.elapsed(),
-    })
+    }
 }
 
 fn filter_all<F: Fn(Id) -> bool + Sync>(n: Id, f: &F) -> Vec<Id> {
@@ -173,7 +203,7 @@ fn filter_all<F: Fn(Id) -> bool + Sync>(n: Id, f: &F) -> Vec<Id> {
 
 /// Every filter except the name match, cheapest first.
 #[inline]
-fn passes_filters(index: &Index, q: &Query, id: Id) -> bool {
+pub(crate) fn passes_filters(index: &Index, q: &Query, id: Id) -> bool {
     let f = index.flags(id);
     if f & flags::TOMBSTONE != 0 {
         return false;

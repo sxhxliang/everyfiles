@@ -11,6 +11,12 @@ readme = "README.md"
 name = "everyfiles"
 path = "src/main.rs"
 
+[features]
+default = ["pinyin"]
+## `--pinyin`: match Han characters by their pinyin. On by default; a
+## build without it has no such flag.
+pinyin = ["everyfiles/pinyin"]
+
 [dependencies]
 everyfiles.workspace = true
 everyfiles-testkit.workspace = true

@@ -40,6 +40,7 @@ thiserror = "2.0"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 dirs = "7.0"
 walkdir = "2.5"
+pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
 filetime = "0.2"
 tempfile = "3.27"
 proptest = "1.11"

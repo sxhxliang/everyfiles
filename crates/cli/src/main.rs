@@ -56,7 +56,8 @@ enum Cmd {
     Search {
         /// Substring to look for (case-insensitive by default). If it contains
         /// `*` or `?` it is matched as a whole-name glob instead; quote it so
-        /// the shell does not expand it.
+        /// the shell does not expand it. With `--pinyin`, letters also match
+        /// Han characters by their pinyin.
         query: String,
         /// Directory tree to search.
         #[arg(long)]
@@ -93,6 +94,14 @@ enum Cmd {
         /// Match the whole name rather than a substring (implied by a glob).
         #[arg(long)]
         exact: bool,
+        /// Read the query as pinyin: each letter matches an ASCII character
+        /// or part of a Han character's reading, as its initial or as a prefix
+        /// of it, so `pysousuo` finds 拼音搜索 and `pysousuoeve` finds
+        /// 拼音搜索Everything. With `--exact` the whole name must be covered.
+        /// Always case-insensitive; cannot be combined with `*` or `?`.
+        #[cfg(feature = "pinyin")]
+        #[arg(long, conflicts_with = "case_sensitive")]
+        pinyin: bool,
         /// Only entries modified at or after this time: `2024-02-29`,
         /// `2024-02-29T13:05Z`, or relative like `-7d`, `-2h`.
         #[arg(long, allow_hyphen_values = true)]
@@ -311,6 +320,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dirs_only,
             case_sensitive,
             exact,
+            #[cfg(feature = "pinyin")]
+            pinyin,
             after,
             before,
             min_size,
@@ -348,6 +359,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 needle: query,
                 case_sensitive,
                 exact,
+                #[cfg(feature = "pinyin")]
+                pinyin,
                 kind: if files_only {
                     KindFilter::FilesOnly
                 } else if dirs_only {

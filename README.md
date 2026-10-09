@@ -50,6 +50,8 @@ On this development machine (Apple Silicon, APFS), release build:
 | Index of ~1,000,000 synthetic records | 65 MiB resident (33 B metadata/record + both name pools) |
 | Query, 1M records, typical needle | 0.2 – 1 ms |
 | Query, 1M records, one letter matching 491k names | 3.2 ms |
+| Pinyin query, same 1M ASCII records (no Han names, so no DP runs) | 1.5 ms for `report`, 0.5 ms for a miss (vs 1.0 / 0.15 ms substring) |
+| Pinyin query, 200k all-Chinese names (every record through the DP) | 3.5 – 4.4 ms (~20 ns/record across cores) |
 | Load a saved 1M-record index (66 MB file) | **0.26 ms** (zero-copy mmap; only partial tail blocks are copied) |
 | Load + verify payload checksum | 6.6 ms |
 | Save 1M records | 26 – 57 ms |
@@ -71,6 +73,7 @@ $B index  ~/Code                      # scan, save to the cache dir, print stats
 $B search main.rs --root ~/Code       # loads the saved index if still fresh
 $B search report --root ~/Code --files-only --min-size 1M --sort size --desc
 $B search "" --root ~/Code -o null | xargs -0 ...   # NUL-separated paths
+$B search pysousuo --root ~/Code --pinyin   # 拼音搜索: initials, syllables, or a mix
 $B watch  ~/Code                      # keep the index current; prints each batch
 $B stats  ~/Code                      # records, memory, coverage, active paths
 $B verify ~/Code                      # differential check against a naive walk
@@ -92,6 +95,16 @@ not expand it. Also: `--case-sensitive`, `--exact`, `--files-only`/`--dirs-only`
 `--min-size`/`--max-size` (`10K`, `4M`, `1G`), `--after`/`--before`
 (`2024-02-29`, `2024-02-29T13:05Z`, or relative `-7d`, `-2h`).
 
+With `--pinyin`, letters also match Han characters by their pinyin, each
+character by the initial or any prefix of one of its readings: `pysousuo`
+finds `拼音搜索`, `pysousuoeve` finds `拼音搜索Everything`, `cq` finds `重庆`.
+The run has to be contiguous, like a substring (`pyev` does not match
+`拼音搜索Everything`), every reading of a polyphone counts, `ü` is typed `v`
+or `u`, and a Han character pasted into the query matches itself. Always
+case-insensitive; `--exact` requires the whole name to be covered; not
+combinable with `*`/`?`. The library crates keep this behind the `pinyin`
+feature (off by default); the CLI turns it on.
+
 ## How it works
 
 - **Index.** Struct-of-arrays: eight parallel arrays (name offset/len, folded
@@ -109,6 +122,14 @@ not expand it. Also: `--case-sensitive`, `--exact`, `--files-only`/`--dirs-only`
   match, so it prefilters and the full matcher runs only on survivors. Filters
   are one cheapest-first predicate per hit. Paging uses `select_nth` so a
   100-row page never sorts a million hits.
+- **Pinyin (feature `pinyin`).** Each letter of the needle consumes an ASCII
+  character or a prefix of a Han character's reading, contiguously, so on an
+  ASCII name it degenerates to a substring match. A bit-parallel DP (one bit
+  per needle byte in a `u128`) decides a name in one pass with no allocation.
+  A name with no non-ASCII byte cannot hold a Han character, so those are
+  answered by the same SIMD scan as a plain substring; one extra SWAR pass
+  finds the names with a high byte and only they go through the DP. Readings
+  come from the `pinyin` crate (41k characters, polyphones included).
 - **Persistence.** A flat little-endian file: 256-byte header, scalar-array
   sections, section table, xxh3 checksums. Loading maps the file and casts
   slices; every full block is served from the mapping, so a 66 MB index is
@@ -145,6 +166,10 @@ not expand it. Also: `--case-sensitive`, `--exact`, `--files-only`/`--dirs-only`
 - **inotify watch budget.** `/proc/sys/fs/inotify/max_user_watches` caps
   watched directories; uncovered ones trigger periodic sweeps instead.
 - **Simple case folding only.** `ß` does not match `ss`.
+- **Pinyin is prefix-of-reading, not fuzzy.** `s`, `so` and `sou` consume 搜;
+  `su` does not. Readings are tone-less; a character without one (emoji,
+  kana) is matched only by itself. A tree whose names are all Chinese pays
+  the DP on every record (about 20 ms per million names).
 - **No regex.** Substrings and `*`/`?` globs only. A glob with no run of two
   or more literal characters (such as `*a*`) cannot use the SIMD prefilter and
   tests every name; that is correct but slower.
@@ -160,6 +185,8 @@ cargo test --workspace                       # 90+ tests; macOS-only ones run he
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask xcheck                           # type-check Linux/Windows backends from any host
 cargo bench -p everyfiles-core               # criterion: query + store
+cargo test --workspace --all-features        # the pinyin feature too (the CLI already turns it on)
+cargo bench -p everyfiles-core --features pinyin --bench query -- pinyin
 ```
 
 `cargo xtask xcheck` proves FFI names, signatures, struct fields and cfg

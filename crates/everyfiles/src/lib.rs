@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 pub use everyfiles_core as core;
 pub use everyfiles_core::engine::{self, OpenOptions, OpenOutcome, RescanReason};
 pub use everyfiles_core::index::{Id, Index, ROOT, flags};
+#[cfg(feature = "pinyin")]
+pub use everyfiles_core::pinyin;
 pub use everyfiles_core::platform::VolumeConfig;
 pub use everyfiles_core::query;
 pub use everyfiles_core::scan::{self, ScanOptions, ScanStats, Scanner, build_index};

@@ -17,10 +17,14 @@ memmap2.workspace = true
 bytemuck.workspace = true
 xxhash-rust.workspace = true
 arc-swap.workspace = true
+pinyin = { workspace = true, optional = true }
 
 [features]
 ## In-memory test doubles (`everyfiles_core::testing`). Enabled by the testkit.
 testing = []
+## Pinyin matching for Han-character names (`everyfiles_core::pinyin`).
+## Pulls in the `pinyin` crate, whose table covers ~41k characters.
+pinyin = ["dep:pinyin"]
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -106,7 +106,7 @@ where
 
 /// First index in `0..n` for which `pred` is false, assuming `pred` is
 /// true for a prefix and false afterwards.
-fn partition_point(n: usize, pred: impl Fn(usize) -> bool) -> usize {
+pub(crate) fn partition_point(n: usize, pred: impl Fn(usize) -> bool) -> usize {
     let (mut lo, mut hi) = (0usize, n);
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
