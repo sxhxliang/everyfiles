@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 description = "everyfiles command-line interface"
+readme = "README.md"
 
 [[bin]]
 name = "everyfiles"

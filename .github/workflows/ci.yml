@@ -62,3 +62,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: EVERYFILES_BENCH_RECORDS=50000 cargo bench -p everyfiles-core -- --test
+
+  bench-report:
+    name: benchmark report (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p everyfiles-cli
+      - name: human-readable
+        shell: bash
+        run: target/release/everyfiles bench --records 1000000 --iterations 50 --path crates --scan-iterations 3 | tee bench-${{ matrix.os }}.txt
+      - name: json
+        shell: bash
+        run: target/release/everyfiles bench --records 1000000 --iterations 50 --path crates --scan-iterations 3 --json > bench-${{ matrix.os }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-${{ matrix.os }}.*

@@ -189,7 +189,14 @@ fn try_load(
 
 /// `Some(path)` of the first disagreement, `None` if all samples agree or
 /// the backend cannot stat.
+///
+/// The stats run in parallel: on a tree larger than the kernel's vnode cache
+/// (macOS defaults to ~250k) each random `stat` is a cold path walk, and
+/// sixteen of them in sequence cost tens of milliseconds; in parallel they
+/// cost about one.
 fn spot_check(scanner: &dyn Scanner, index: &Index, samples: usize) -> Option<PathBuf> {
+    use rayon::prelude::*;
+
     let n = index.len() as u64;
     if samples == 0 || n <= 1 {
         return None;
@@ -200,39 +207,34 @@ fn spot_check(scanner: &dyn Scanner, index: &Index, samples: usize) -> Option<Pa
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x9E37_79B9)
         | 1;
-    let mut checked = 0;
+    let mut ids: Vec<Id> = Vec::with_capacity(samples);
     let mut attempts = 0;
-    while checked < samples && attempts < samples * 8 {
+    while ids.len() < samples && attempts < samples * 8 {
         attempts += 1;
         s = s
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         let id = (1 + (s >> 33) % (n - 1)) as Id;
-        if index.is_tombstone(id) {
-            continue;
+        if !index.is_tombstone(id) {
+            ids.push(id);
         }
+    }
+    ids.par_iter().find_map_any(|&id| {
         let path = index.resolve_path(id);
         match scanner.stat_entry(&path) {
-            Ok(None) => return None, // backend cannot check; trust the index
-            Err(_) => return Some(path),
+            Ok(None) => None, // backend cannot check; trust the index
+            Err(_) => Some(path),
             Ok(Some(st)) => {
                 let f = index.flags(id);
                 let is_dir = f & flags::DIR != 0;
-                if is_dir != (st.kind == Kind::Dir) {
-                    return Some(path);
-                }
-                if f & flags::HAS_SIZE != 0
-                    && st.kind == Kind::File
-                    && st.size.is_some_and(|sz| sz != index.size(id))
-                {
-                    return Some(path);
-                }
-                if f & flags::HAS_MTIME != 0 && st.mtime.is_some_and(|m| m != index.mtime(id)) {
-                    return Some(path);
-                }
-                checked += 1;
+                let mismatch = is_dir != (st.kind == Kind::Dir)
+                    || (f & flags::HAS_SIZE != 0
+                        && st.kind == Kind::File
+                        && st.size.is_some_and(|sz| sz != index.size(id)))
+                    || (f & flags::HAS_MTIME != 0
+                        && st.mtime.is_some_and(|m| m != index.mtime(id)));
+                mismatch.then_some(path)
             }
         }
-    }
-    None
+    })
 }

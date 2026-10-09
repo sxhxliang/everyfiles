@@ -53,10 +53,13 @@ On this development machine (Apple Silicon, APFS), release build:
 | Load a saved 1M-record index (66 MB file) | **0.26 ms** (zero-copy mmap; only partial tail blocks are copied) |
 | Load + verify payload checksum | 6.6 ms |
 | Save 1M records | 26 – 57 ms |
-| Scan `/usr` (77,256 entries), native vs generic | **99 ms vs 632 ms** |
+| Scan `/usr` (77,256 entries), native vs generic, warm cache | **98 ms vs 170 ms** (632 ms generic when the name cache is cold) |
+| Whole home directory, 4.97M records, native | 46 s to build (bounded by the 250k-entry vnode cache), 369 MiB, typical query 10–15 ms end to end, worst case (one letter, 2.5M hits) ~50 ms |
 
 The memory figure is enforced by a test with a counting allocator, not just
-computed.
+computed. The full suite, methodology and per-operation analysis are in
+[`docs/benchmarks.zh-CN.md`](docs/benchmarks.zh-CN.md); CI uploads the same
+suite's output for Ubuntu, macOS and Windows as `bench-<os>` artifacts.
 
 ## Usage
 
@@ -71,7 +74,8 @@ $B search "" --root ~/Code -o null | xargs -0 ...   # NUL-separated paths
 $B watch  ~/Code                      # keep the index current; prints each batch
 $B stats  ~/Code                      # records, memory, coverage, active paths
 $B verify ~/Code                      # differential check against a naive walk
-$B bench  --records 1000000           # synthetic index + query latencies
+$B bench  --records 1000000 --path ~/Code   # build/save/load, substring, glob, filter, sort; plus real scans
+scripts/bench.sh ~/Code                  # same, with system info; see docs/benchmarks.zh-CN.md
 $B backends                           # what this binary was built with
 ```
 
@@ -81,10 +85,12 @@ Output formats: `human` (default on a tty), `tsv` (default when piped),
 `%LOCALAPPDATA%\everyfiles\cache`). `--backend generic` forces the portable
 path on any host.
 
-Queries are case-insensitive substrings by default. `--case-sensitive`,
-`--exact`, `--files-only`/`--dirs-only`, `--min-size`/`--max-size`, `--scope`
-are supported. Wildcards are **rejected with a clear error** rather than
-silently mis-answered.
+Queries are case-insensitive substrings by default. A query containing `*` or
+`?` is matched as a whole-name glob instead (`'*.rs'`, `'IMG_????.JPG'`;
+`?` is one character, so `'?.txt'` matches `日.txt`), quoted so the shell does
+not expand it. Also: `--case-sensitive`, `--exact`, `--files-only`/`--dirs-only`,
+`--min-size`/`--max-size` (`10K`, `4M`, `1G`), `--after`/`--before`
+(`2024-02-29`, `2024-02-29T13:05Z`, or relative `-7d`, `-2h`).
 
 ## How it works
 
@@ -98,9 +104,11 @@ silently mis-answered.
   reconstruction provably terminating, and compaction a single forward pass.
 - **Query.** One SIMD `memmem` scan per 1 MiB block of the folded pool, in
   parallel, then a linear merge of hit offsets back to record ids. Because a
-  needle never contains `0x00` a hit can never straddle two names. Filters are
-  one cheapest-first predicate per hit. Paging uses `select_nth` so a 100-row
-  page never sorts a million hits.
+  needle never contains `0x00` a hit can never straddle two names. Globs reuse
+  the same scan: the longest literal run in the pattern must appear in every
+  match, so it prefilters and the full matcher runs only on survivors. Filters
+  are one cheapest-first predicate per hit. Paging uses `select_nth` so a
+  100-row page never sorts a million hits.
 - **Persistence.** A flat little-endian file: 256-byte header, scalar-array
   sections, section table, xxh3 checksums. Loading maps the file and casts
   slices; every full block is served from the mapping, so a 66 MB index is
@@ -137,11 +145,15 @@ silently mis-answered.
 - **inotify watch budget.** `/proc/sys/fs/inotify/max_user_watches` caps
   watched directories; uncovered ones trigger periodic sweeps instead.
 - **Simple case folding only.** `ß` does not match `ss`.
-- **No globs or regex yet.** Literal substrings only.
+- **No regex.** Substrings and `*`/`?` globs only. A glob with no run of two
+  or more literal characters (such as `*a*`) cannot use the SIMD prefilter and
+  tests every name; that is correct but slower.
 - The directory-mtime sweep cannot see a size change to a file inside an
   otherwise untouched directory; the live watcher covers that case.
 
 ## Development
+
+中文开发文档见 [`docs/development.zh-CN.md`](docs/development.zh-CN.md)。
 
 ```sh
 cargo test --workspace                       # 90+ tests; macOS-only ones run here

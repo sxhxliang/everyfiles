@@ -45,7 +45,8 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
     enumerator threads over a FIFO `Injector`, one assembler thread allocating
     ids. The assembler decrements the pending counter only *after* queueing a
     directory's children.
-  - `query/` — `search` (pool scan + offset merge in `matcher.rs`), filters,
+  - `query/` — `search` (pool scan + offset merge in `matcher.rs`; whole-name
+    globs in `glob.rs`, prefiltered by their longest literal run), filters,
     `sort_ids`, `truncate_top` (select_nth), `page`.
   - `store/` — on-disk format (`header.rs`), atomic `save` (`write.rs`),
     zero-copy `load` (`load.rs`). xxh3 checksums.

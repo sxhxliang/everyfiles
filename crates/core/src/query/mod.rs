@@ -8,7 +8,10 @@
 //! Substring matching runs one SIMD scan per block of the folded name pool
 //! and merges hit offsets back to ids (see [`matcher`]). Small indexes are
 //! scanned on the calling thread so a tiny query never pays for a thread pool.
+//! A needle containing `*` or `?` is matched as a whole-name glob instead
+//! (see [`glob`]), prefiltered by the longest literal run in the pattern.
 
+mod glob;
 mod matcher;
 
 use std::time::{Duration, Instant};
@@ -68,11 +71,6 @@ impl Query {
     /// Reject queries this version cannot answer correctly rather than
     /// silently answering something else.
     pub fn validate(&self) -> Result<()> {
-        if self.needle.contains(['*', '?']) {
-            return Err(Error::Query(
-                "wildcards are not supported yet; search for a literal substring".into(),
-            ));
-        }
         if let (Some(lo), Some(hi)) = (self.min_size, self.max_size)
             && lo > hi
         {
@@ -106,6 +104,38 @@ pub fn search(index: &Index, q: &Query) -> Result<Matches> {
 
     let ids: Vec<Id> = if needle.is_empty() {
         filter_all(n, &pred)
+    } else if glob::has_wildcards(&needle) {
+        // A whole-name glob. `exact` is implied and ignored. A literal run of
+        // two or more bytes in the pattern must appear verbatim in any match,
+        // so it is a sound prefilter; without one, every record is tested.
+        let literal = glob::longest_literal_run(&needle);
+        if literal.len() >= 2 {
+            let view = if q.case_sensitive {
+                index.name_view()
+            } else {
+                index.fold_view()
+            };
+            let pat = needle.clone();
+            matcher::scan_pool(&view, literal, move |id| {
+                let hay = if q.case_sensitive {
+                    index.name(id)
+                } else {
+                    index.folded(id)
+                };
+                glob::glob_match(&pat, hay) && pred(id)
+            })
+        } else {
+            let pat = needle.clone();
+            let f = move |id: Id| {
+                let hay = if q.case_sensitive {
+                    index.name(id)
+                } else {
+                    index.folded(id)
+                };
+                glob::glob_match(&pat, hay) && pred(id)
+            };
+            filter_all(n, &f)
+        }
     } else if q.exact {
         let hay = |id: Id| {
             if q.case_sensitive {
@@ -185,18 +215,61 @@ pub fn truncate_top(index: &Index, ids: &mut Vec<Id>, key: SortKey, desc: bool, 
     if k == 0 || ids.len() <= k {
         return;
     }
-    if key == SortKey::Path {
-        // Path order needs every path anyway; a full sort is the honest cost.
-        sort_ids(index, ids, key, desc);
-        ids.truncate(k);
-        return;
+    match key {
+        SortKey::Path => {
+            // Path order needs every path anyway; a full sort is the honest cost.
+            sort_ids(index, ids, key, desc);
+            ids.truncate(k);
+        }
+        SortKey::Name => {
+            let mut keyed = name_keyed(index, ids);
+            keyed.select_nth_unstable_by(k - 1, |a, b| name_keyed_cmp(index, desc, a, b));
+            keyed.truncate(k);
+            ids.clear();
+            ids.extend(keyed.into_iter().map(|(_, id)| id));
+        }
+        SortKey::Size | SortKey::Mtime => {
+            let cmp = |a: &Id, b: &Id| {
+                let o = compare(index, key, *a, *b);
+                if desc { o.reverse() } else { o }
+            };
+            ids.select_nth_unstable_by(k - 1, cmp);
+            ids.truncate(k);
+        }
     }
-    let cmp = |a: &Id, b: &Id| {
-        let o = compare(index, key, *a, *b);
-        if desc { o.reverse() } else { o }
-    };
-    ids.select_nth_unstable_by(k - 1, cmp);
-    ids.truncate(k);
+}
+
+/// The first eight folded-name bytes as a big-endian integer: byte-wise
+/// lexicographic order on names is integer order on these keys, and names
+/// never contain `0x00`, so zero padding sorts a shorter name first exactly
+/// as the full comparison would. Comparing integers instead of two random
+/// pool reads per step is what keeps ordering millions of hits cheap; the
+/// full name is consulted only when prefixes tie.
+#[inline]
+fn name_prefix(index: &Index, id: Id) -> u64 {
+    let n = index.folded(id);
+    let mut b = [0u8; 8];
+    let l = n.len().min(8);
+    b[..l].copy_from_slice(&n[..l]);
+    u64::from_be_bytes(b)
+}
+
+fn name_keyed(index: &Index, ids: &[Id]) -> Vec<(u64, Id)> {
+    if ids.len() < PAR_THRESHOLD {
+        ids.iter().map(|&id| (name_prefix(index, id), id)).collect()
+    } else {
+        ids.par_iter()
+            .map(|&id| (name_prefix(index, id), id))
+            .collect()
+    }
+}
+
+#[inline]
+fn name_keyed_cmp(index: &Index, desc: bool, a: &(u64, Id), b: &(u64, Id)) -> std::cmp::Ordering {
+    let o =
+        a.0.cmp(&b.0)
+            .then_with(|| compare(index, SortKey::Name, a.1, b.1));
+    if desc { o.reverse() } else { o }
 }
 
 fn compare(index: &Index, key: SortKey, a: Id, b: Id) -> std::cmp::Ordering {
@@ -215,7 +288,18 @@ fn compare(index: &Index, key: SortKey, a: Id, b: Id) -> std::cmp::Ordering {
 /// Sort matched ids in place.
 pub fn sort_ids(index: &Index, ids: &mut [Id], key: SortKey, desc: bool) {
     match key {
-        SortKey::Name | SortKey::Size | SortKey::Mtime => {
+        SortKey::Name => {
+            let mut keyed = name_keyed(index, ids);
+            if keyed.len() < PAR_THRESHOLD {
+                keyed.sort_unstable_by(|a, b| name_keyed_cmp(index, false, a, b));
+            } else {
+                keyed.par_sort_unstable_by(|a, b| name_keyed_cmp(index, false, a, b));
+            }
+            for (slot, (_, id)) in ids.iter_mut().zip(keyed) {
+                *slot = id;
+            }
+        }
+        SortKey::Size | SortKey::Mtime => {
             if ids.len() < PAR_THRESHOLD {
                 ids.sort_unstable_by(|&a, &b| compare(index, key, a, b));
             } else {
@@ -400,12 +484,50 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_queries_are_rejected() {
+    fn glob_queries_match_whole_names() {
         let idx = fixture();
-        assert!(matches!(
-            search(&idx, &Query::new("*.rs")),
-            Err(Error::Query(_))
-        ));
+        let mut m = search(&idx, &Query::new("*.rs")).unwrap();
+        sort_ids(&idx, &mut m.ids, SortKey::Name, false);
+        assert_eq!(names(&idx, &m.ids), ["lib.rs", "main.rs", "Util.RS"]);
+
+        // `?` is one character, not one byte.
+        let m = search(&idx, &Query::new("????.txt")).unwrap();
+        assert_eq!(names(&idx, &m.ids), ["ファイル.txt"]);
+        assert!(search(&idx, &Query::new("?.txt")).unwrap().ids.is_empty());
+
+        // Only wildcards: everything but the root.
+        let all = search(&idx, &Query::new("*")).unwrap();
+        assert_eq!(all.ids.len(), idx.len() - 1);
+        assert!(search(&idx, &Query::new("*.zzz")).unwrap().ids.is_empty());
+
+        // Literal run too short for the prefilter: slow path, same answers.
+        let m = search(&idx, &Query::new("*a*a*")).unwrap();
+        let mut expect: Vec<String> = (1..idx.len() as Id)
+            .filter(|&i| idx.folded(i).iter().filter(|&&b| b == b'a').count() >= 2)
+            .map(|i| String::from_utf8_lossy(idx.name(i)).into_owned())
+            .collect();
+        expect.sort();
+        let mut got = names(&idx, &m.ids);
+        got.sort();
+        assert_eq!(got, expect);
+    }
+
+    #[test]
+    fn glob_respects_case_sensitivity() {
+        let idx = fixture();
+        let m = search(
+            &idx,
+            &Query {
+                needle: "*.RS".into(),
+                case_sensitive: true,
+                ..Query::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(names(&idx, &m.ids), ["Util.RS"]);
+        let mut m = search(&idx, &Query::new("*.RS")).unwrap();
+        sort_ids(&idx, &mut m.ids, SortKey::Name, false);
+        assert_eq!(names(&idx, &m.ids), ["lib.rs", "main.rs", "Util.RS"]);
     }
 
     #[test]
@@ -421,6 +543,54 @@ mod tests {
         assert_eq!(page(&m.ids, 2, 3), &m.ids[2..5]);
         assert_eq!(page(&m.ids, 100, 3).len(), 0);
         assert_eq!(page(&m.ids, 0, 0).len(), m.ids.len());
+    }
+
+    #[test]
+    fn name_order_with_shared_prefixes_matches_full_comparison() {
+        use crate::platform::VolumeConfig;
+        let mut idx = Index::new(VolumeConfig::unix(), PathBuf::from("/r"), None);
+        let names = [
+            "prefix_shared_zzz.txt",
+            "prefix_shared_aaa.txt",
+            "prefix_s",
+            "prefix_shared",
+            "PREFIX_SHARED_mmm.txt",
+            "b",
+            "a",
+            "ab",
+            "prefix_shared_aaa.txt~",
+        ];
+        for n in names {
+            idx.push_record(n.as_bytes(), 0, 0, 0, 0).unwrap();
+        }
+        let mut ids: Vec<Id> = (1..idx.len() as Id).collect();
+        sort_ids(&idx, &mut ids, SortKey::Name, false);
+        let got = names_of(&idx, &ids);
+        let mut want: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        want.sort_by(|a, b| {
+            a.to_lowercase()
+                .as_bytes()
+                .cmp(b.to_lowercase().as_bytes())
+                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
+        });
+        assert_eq!(got, want);
+        // top-k agrees with the full sort for several k, both directions
+        for k in [1, 2, 4, 8] {
+            for desc in [false, true] {
+                let mut full: Vec<Id> = (1..idx.len() as Id).collect();
+                sort_ids(&idx, &mut full, SortKey::Name, desc);
+                let mut top: Vec<Id> = (1..idx.len() as Id).collect();
+                truncate_top(&idx, &mut top, SortKey::Name, desc, k);
+                sort_ids(&idx, &mut top, SortKey::Name, desc);
+                assert_eq!(top, full[..k], "k={k} desc={desc}");
+            }
+        }
+    }
+
+    fn names_of(idx: &Index, ids: &[Id]) -> Vec<String> {
+        ids.iter()
+            .map(|&i| String::from_utf8_lossy(idx.name(i)).into_owned())
+            .collect()
     }
 
     #[test]

@@ -54,6 +54,72 @@ pub fn format_utc(ns: i64) -> String {
     )
 }
 
+/// A point in time for `--after` / `--before`:
+/// `2024-02-29`, `2024-02-29T13:05`, `2024-02-29T13:05:09Z` (all UTC), or an
+/// offset back from now: `-45s`, `-30m`, `-2h`, `-7d`, `-3w`.
+pub fn parse_time(s: &str, now_ns: i64) -> Result<i64, String> {
+    let s = s.trim();
+    if let Some(rel) = s.strip_prefix('-') {
+        let digits_end = rel.find(|c: char| !c.is_ascii_digit()).unwrap_or(rel.len());
+        let (num, unit) = rel.split_at(digits_end);
+        let n: i64 = num
+            .parse()
+            .map_err(|_| format!("invalid relative time `{s}`"))?;
+        let secs: i64 = match unit.trim() {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3_600,
+            "d" => 86_400,
+            "w" => 604_800,
+            _ => return Err(format!("unknown unit in `{s}` (use s, m, h, d, w)")),
+        };
+        return Ok(now_ns.saturating_sub(n.saturating_mul(secs).saturating_mul(1_000_000_000)));
+    }
+    let (date, time) = match s.split_once('T') {
+        Some((d, t)) => (d, Some(t.trim_end_matches('Z'))),
+        None => (s, None),
+    };
+    let mut parts = date.split('-');
+    let bad = || format!("invalid date `{s}` (expected YYYY-MM-DD[THH:MM[:SS]][Z] or -7d)");
+    let y: i64 = parts.next().and_then(|x| x.parse().ok()).ok_or_else(bad)?;
+    let m: u32 = parts.next().and_then(|x| x.parse().ok()).ok_or_else(bad)?;
+    let d: u32 = parts.next().and_then(|x| x.parse().ok()).ok_or_else(bad)?;
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return Err(bad());
+    }
+    let mut secs = 0i64;
+    if let Some(t) = time {
+        let mut tp = t.split(':');
+        let h: i64 = tp.next().and_then(|x| x.parse().ok()).ok_or_else(bad)?;
+        let mi: i64 = tp.next().and_then(|x| x.parse().ok()).ok_or_else(bad)?;
+        let sec: i64 = match tp.next() {
+            Some(x) => x.parse().map_err(|_| bad())?,
+            None => 0,
+        };
+        if tp.next().is_some()
+            || !(0..24).contains(&h)
+            || !(0..60).contains(&mi)
+            || !(0..61).contains(&sec)
+        {
+            return Err(bad());
+        }
+        secs = h * 3600 + mi * 60 + sec;
+    }
+    let days = days_from_civil(y, m, d);
+    Ok((days * 86_400 + secs).saturating_mul(1_000_000_000))
+}
+
+/// Howard Hinnant's days-from-civil; the inverse of `civil_from_days`.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = i64::from(if m > 2 { m - 3 } else { m + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Howard Hinnant's days-from-civil inverse; valid for the full i64 day range
 /// a filesystem will ever produce.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -91,6 +157,35 @@ mod tests {
         assert_eq!(parse_size("1.5k").unwrap(), 1536);
         assert!(parse_size("abc").is_err());
         assert!(parse_size("3x").is_err());
+    }
+
+    #[test]
+    fn parse_times() {
+        const NS: i64 = 1_000_000_000;
+        assert_eq!(parse_time("1970-01-01", 0).unwrap(), 0);
+        assert_eq!(
+            parse_time("2024-02-29T12:34:56Z", 0).unwrap(),
+            1_709_210_096 * NS
+        );
+        assert_eq!(
+            parse_time("2024-02-29T12:34", 0).unwrap(),
+            (1_709_210_096 - 56) * NS
+        );
+        assert_eq!(parse_time("-1d", 86_400 * NS).unwrap(), 0);
+        assert_eq!(parse_time("-90m", 2 * 3_600 * NS).unwrap(), 1_800 * NS);
+        assert_eq!(parse_time("-2w", 0).unwrap(), -14 * 86_400 * NS);
+        for bad in [
+            "yesterday",
+            "2024-13-01",
+            "2024-02-29T25:00",
+            "-3x",
+            "2024-02",
+        ] {
+            assert!(parse_time(bad, 0).is_err(), "{bad}");
+        }
+        // round trip with the formatter
+        let t = parse_time("1999-12-31T23:59:00Z", 0).unwrap();
+        assert_eq!(format_utc(t), "1999-12-31 23:59");
     }
 
     #[test]

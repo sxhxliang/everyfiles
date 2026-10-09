@@ -1,5 +1,6 @@
 //! `everyfiles` — instant filename search over an in-memory index.
 
+mod bench;
 mod fmt;
 
 use std::io::Write;
@@ -13,7 +14,7 @@ use everyfiles::{
     BackendOptions, Id, Index, OpenOptions, OpenOutcome, ScanOptions, ScanStats, build_index,
     host_volume_config,
 };
-use everyfiles_testkit::{GeneratedScanner, oracle};
+use everyfiles_testkit::oracle;
 
 #[derive(Parser, Debug)]
 #[command(name = "everyfiles", version, about, long_about = None)]
@@ -41,17 +42,21 @@ struct Cli {
 enum Cmd {
     /// Scan a directory tree, save the index, and report statistics.
     Index {
+        /// Directory tree to index.
         path: PathBuf,
-        /// Do not recurse below this depth.
+        /// Do not recurse below this depth (root is depth 0).
         #[arg(long)]
         max_depth: Option<u32>,
+        /// Print statistics as a single JSON object.
         #[arg(long)]
         json: bool,
     },
     /// Search file names. Loads the saved index for `--root` when it is still
     /// fresh, otherwise rescans and saves.
     Search {
-        /// Literal substring to look for (case-insensitive by default).
+        /// Substring to look for (case-insensitive by default). If it contains
+        /// `*` or `?` it is matched as a whole-name glob instead; quote it so
+        /// the shell does not expand it.
         query: String,
         /// Directory tree to search.
         #[arg(long)]
@@ -59,35 +64,52 @@ enum Cmd {
         /// Ignore any saved index and rescan.
         #[arg(long)]
         force_rescan: bool,
-        /// Skip the payload checksum when loading.
+        /// Also hash the whole saved index before searching (~10 ms per 100 MB).
+        /// The header checksum and a random spot-check against the filesystem
+        /// always run; this adds end-to-end payload integrity on top.
         #[arg(long)]
-        no_verify: bool,
+        verify: bool,
         /// Maximum rows to print; 0 means all.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Skip this many rows first (for paging).
         #[arg(long, default_value_t = 0)]
         offset: usize,
+        /// Sort key. `path` reconstructs every matched path and is the slow one.
         #[arg(long, value_enum, default_value_t = SortArg::Name)]
         sort: SortArg,
+        /// Reverse the sort order.
         #[arg(long)]
         desc: bool,
+        /// Only files (and symlinks), no directories.
         #[arg(long, conflicts_with = "dirs_only")]
         files_only: bool,
+        /// Only directories.
         #[arg(long)]
         dirs_only: bool,
+        /// Compare bytes exactly instead of case-folding both sides.
         #[arg(long)]
         case_sensitive: bool,
-        /// Match the whole name rather than a substring.
+        /// Match the whole name rather than a substring (implied by a glob).
         #[arg(long)]
         exact: bool,
-        /// Minimum size, e.g. `10K`, `4M`, `1G`.
+        /// Only entries modified at or after this time: `2024-02-29`,
+        /// `2024-02-29T13:05Z`, or relative like `-7d`, `-2h`.
+        #[arg(long, allow_hyphen_values = true)]
+        after: Option<String>,
+        /// Only entries modified at or before this time (same formats).
+        #[arg(long, allow_hyphen_values = true)]
+        before: Option<String>,
+        /// Minimum size, e.g. `10K`, `4M`, `1G` (binary units).
         #[arg(long)]
         min_size: Option<String>,
+        /// Maximum size, same format as `--min-size`.
         #[arg(long)]
         max_size: Option<String>,
         /// Include hidden/system entries.
         #[arg(long)]
         hidden: bool,
+        /// Limit depth; implies a fresh scan rather than loading the saved index.
         #[arg(long)]
         max_depth: Option<u32>,
         #[arg(short = 'o', long, value_enum, default_value_t = OutputFmt::Human)]
@@ -112,21 +134,27 @@ enum Cmd {
         /// Apply one batch and exit.
         #[arg(long)]
         once: bool,
+        /// Ignore any saved index and rescan before watching.
         #[arg(long)]
         force_rescan: bool,
     },
     /// Show the saved index for `path` (loading or rescanning as needed).
     Stats {
+        /// Directory tree whose index to inspect.
         path: PathBuf,
+        /// Ignore any saved index and rescan.
         #[arg(long)]
         force_rescan: bool,
+        /// Print as a single JSON object.
         #[arg(long)]
         json: bool,
     },
     /// Differential check: index `path` and compare against a naive walk.
     /// Exits non-zero if anything is missing, extra, or mismatched.
     Verify {
+        /// Directory tree to check.
         path: PathBuf,
+        /// Print the report as a single JSON object.
         #[arg(long)]
         json: bool,
         /// Show at most this many examples per category.
@@ -135,13 +163,22 @@ enum Cmd {
     },
     /// Build a synthetic index of `--records` entries and time queries.
     Bench {
+        /// Approximate number of synthetic records to generate.
         #[arg(long, default_value_t = 1_000_000)]
         records: u64,
         /// Needle to time; repeatable. Defaults to a representative set.
         #[arg(long = "query")]
         queries: Vec<String>,
+        /// Runs per query for the latency percentiles.
         #[arg(long, default_value_t = 100)]
         iterations: usize,
+        /// Also time a full scan of this real directory with every backend.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Repetitions for each build/scan timing (min and median reported).
+        #[arg(long, default_value_t = 3)]
+        scan_iterations: usize,
+        /// Print results as a single JSON object.
         #[arg(long)]
         json: bool,
     },
@@ -265,7 +302,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             query,
             root,
             force_rescan,
-            no_verify,
+            verify,
             limit,
             offset,
             sort,
@@ -274,6 +311,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dirs_only,
             case_sensitive,
             exact,
+            after,
+            before,
             min_size,
             max_size,
             hidden,
@@ -281,12 +320,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             output,
             stat,
         } => {
+            let now = everyfiles::scan::system_time_to_ns(std::time::SystemTime::now());
             let root = normalize_root(&root)?;
             let scanner = (backend.make_scanner)(&bopts)?;
             let index_path = index_path_for(cli.index.as_deref(), &root)?;
             let opts = OpenOptions {
                 force_rescan: force_rescan || max_depth.is_some(),
-                verify_payload: !no_verify,
+                verify_payload: verify,
                 scan: ScanOptions {
                     threads: cli.threads,
                     max_depth,
@@ -317,8 +357,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 min_size: min_size.as_deref().map(fmt::parse_size).transpose()?,
                 max_size: max_size.as_deref().map(fmt::parse_size).transpose()?,
-                after: None,
-                before: None,
+                after: after
+                    .as_deref()
+                    .map(|t| fmt::parse_time(t, now))
+                    .transpose()?,
+                before: before
+                    .as_deref()
+                    .map(|t| fmt::parse_time(t, now))
+                    .transpose()?,
                 include_hidden: hidden,
             };
             let t1 = std::time::Instant::now();
@@ -484,8 +530,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             records,
             queries,
             iterations,
+            path,
+            scan_iterations,
             json,
-        } => bench(records, &queries, iterations, json, cli.threads),
+        } => bench::run(bench::BenchArgs {
+            records,
+            queries,
+            iterations,
+            scan_iterations,
+            path,
+            json,
+            threads: cli.threads,
+            bopts,
+        }),
     }
 }
 
@@ -821,75 +878,6 @@ fn verify(
         }
     }
     Ok(rep)
-}
-
-fn bench(
-    records: u64,
-    queries: &[String],
-    iterations: usize,
-    json: bool,
-    threads: Option<usize>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let g = GeneratedScanner::with_approx_total("/bench", records);
-    let opts = ScanOptions {
-        threads,
-        max_depth: None,
-    };
-    let (index, stats) = build_index(&g, g.root(), host_volume_config(), &opts)?;
-    let defaults = ["", "a", "rs", "img", "report", "final_notes", "zzzqqqxxx"];
-    let queries: Vec<&str> = if queries.is_empty() {
-        defaults.to_vec()
-    } else {
-        queries.iter().map(String::as_str).collect()
-    };
-    let mut rows = Vec::new();
-    for needle in &queries {
-        let q = Query::new(*needle);
-        let mut lat: Vec<f64> = Vec::with_capacity(iterations);
-        let mut hits = 0usize;
-        for _ in 0..iterations.max(1) {
-            let t = std::time::Instant::now();
-            let m = query::search(&index, &q)?;
-            lat.push(t.elapsed().as_secs_f64() * 1000.0);
-            hits = m.ids.len();
-        }
-        lat.sort_by(|a, b| a.total_cmp(b));
-        let pct = |p: f64| lat[((lat.len() - 1) as f64 * p).round() as usize];
-        rows.push((needle.to_string(), hits, pct(0.5), pct(0.95), pct(0.99)));
-    }
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "records": index.len(),
-                "approx_bytes": index.approx_bytes(),
-                "build_ms": stats.elapsed.as_secs_f64() * 1000.0,
-                "iterations": iterations,
-                "queries": rows.iter().map(|(q, h, p50, p95, p99)| serde_json::json!({
-                    "needle": q, "hits": h, "p50_ms": p50, "p95_ms": p95, "p99_ms": p99
-                })).collect::<Vec<_>>(),
-            })
-        );
-    } else {
-        println!(
-            "records {}   memory {}   build {:.2?}   iterations {}",
-            index.len(),
-            fmt::human_size(index.approx_bytes() as u64),
-            stats.elapsed,
-            iterations
-        );
-        println!(
-            "{:<14} {:>9} {:>9} {:>9} {:>9}",
-            "needle", "hits", "p50 ms", "p95 ms", "p99 ms"
-        );
-        for (q, h, p50, p95, p99) in rows {
-            println!(
-                "{:<14} {h:>9} {p50:>9.3} {p95:>9.3} {p99:>9.3}",
-                format!("{q:?}")
-            );
-        }
-    }
-    Ok(())
 }
 
 fn emit(index: &Index, ids: &[everyfiles::Id], output: OutputFmt) -> std::io::Result<()> {
