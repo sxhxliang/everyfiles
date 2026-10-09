@@ -1,0 +1,12 @@
+[package]
+name = "everyfiles-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Test support: synthetic scanner, naive oracle, fixture trees"
+publish = false
+
+[dependencies]
+everyfiles-core = { workspace = true, features = ["testing"] }
+walkdir.workspace = true

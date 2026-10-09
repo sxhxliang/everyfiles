@@ -1,0 +1,14 @@
+[package]
+name = "everyfiles-backend-generic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Portable reference backend: std::fs enumeration, one lstat per entry"
+
+[dependencies]
+everyfiles-core.workspace = true
+
+[dev-dependencies]
+everyfiles-testkit.workspace = true
+tempfile.workspace = true

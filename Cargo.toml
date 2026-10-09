@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/everyfiles",
+    "crates/testkit",
+    "crates/backend-generic",
+    "crates/backend-macos",
+    "crates/backend-linux",
+    "crates/backend-windows",
+    "crates/cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.98"
+repository = "https://github.com/sxhxliang/everyfiles"
+
+[workspace.dependencies]
+everyfiles-core = { path = "crates/core" }
+everyfiles = { path = "crates/everyfiles" }
+everyfiles-testkit = { path = "crates/testkit" }
+everyfiles-backend-generic = { path = "crates/backend-generic" }
+everyfiles-backend-macos = { path = "crates/backend-macos" }
+everyfiles-backend-linux = { path = "crates/backend-linux" }
+everyfiles-backend-windows = { path = "crates/backend-windows" }
+
+memchr = "2.8"
+rayon = "1.12"
+crossbeam-deque = "0.8"
+crossbeam-channel = "0.5"
+arc-swap = "1.9"
+memmap2 = "0.9"
+bytemuck = { version = "1.25", features = ["derive"] }
+smallvec = "1.16"
+thiserror = "2.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+dirs = "7.0"
+walkdir = "2.5"
+filetime = "0.2"
+tempfile = "3.27"
+proptest = "1.11"
+criterion = "0.8"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+rustix = { version = "1.1", features = ["fs"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 4

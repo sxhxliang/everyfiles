@@ -1,0 +1,20 @@
+[package]
+name = "everyfiles-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "everyfiles command-line interface"
+
+[[bin]]
+name = "everyfiles"
+path = "src/main.rs"
+
+[dependencies]
+everyfiles.workspace = true
+everyfiles-testkit.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

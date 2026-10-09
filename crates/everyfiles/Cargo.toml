@@ -1,0 +1,21 @@
+[package]
+name = "everyfiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Public facade: engine re-exports plus the backend registry"
+
+[dependencies]
+everyfiles-core.workspace = true
+everyfiles-backend-generic.workspace = true
+dirs.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+everyfiles-backend-macos.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+everyfiles-backend-linux.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+everyfiles-backend-windows.workspace = true

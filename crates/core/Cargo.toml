@@ -1,0 +1,36 @@
+[package]
+name = "everyfiles-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Portable in-memory filename index and query engine"
+
+[dependencies]
+memchr.workspace = true
+rayon.workspace = true
+crossbeam-deque.workspace = true
+crossbeam-channel.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+memmap2.workspace = true
+bytemuck.workspace = true
+xxhash-rust.workspace = true
+arc-swap.workspace = true
+
+[features]
+## In-memory test doubles (`everyfiles_core::testing`). Enabled by the testkit.
+testing = []
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true
+everyfiles-testkit.workspace = true
+
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "store"
+harness = false

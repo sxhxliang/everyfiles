@@ -1,0 +1,20 @@
+[package]
+name = "everyfiles-backend-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "everyfiles Linux backend: getdents64 enumeration, fanotify/inotify watching"
+
+[dependencies]
+everyfiles-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+libc.workspace = true
+crossbeam-channel.workspace = true
+everyfiles-backend-generic.workspace = true
+
+[dev-dependencies]
+everyfiles-testkit.workspace = true
+tempfile.workspace = true

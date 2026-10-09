@@ -1,0 +1,19 @@
+[package]
+name = "everyfiles-backend-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "everyfiles macOS backend: getattrlistbulk bulk enumeration and FSEvents watching"
+
+[dependencies]
+everyfiles-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+crossbeam-channel.workspace = true
+everyfiles-backend-generic.workspace = true
+
+[dev-dependencies]
+everyfiles-testkit.workspace = true
+tempfile.workspace = true
