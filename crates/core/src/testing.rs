@@ -352,8 +352,14 @@ const EXTS: &[&str] = &[
 
 impl GeneratedScanner {
     pub fn new(root: impl Into<PathBuf>, depth: u32, fanout: u32, files_per_dir: u32) -> Self {
+        let root = root.into();
+        // `build_index` and the engine call `std::path::absolute` on the scan
+        // root before they reach `root_info`, so the scanner has to store that
+        // same form or the two paths never compare equal. `absolute` is
+        // lexical only, so this keeps core free of filesystem access.
+        let root = std::path::absolute(&root).unwrap_or(root);
         Self {
-            root: root.into(),
+            root,
             depth,
             fanout,
             files_per_dir,
@@ -513,6 +519,17 @@ mod generated_tests {
         assert_eq!(idx.len() as u64, g.expected_total());
         assert_eq!(stats.dirs, 13);
         assert_eq!(stats.files, 65);
+    }
+
+    /// The scan and engine layers absolutize the root before `root_info`; a
+    /// scanner keeping the raw `"/bench"` failed on Windows, where
+    /// `std::path::absolute("/bench")` is `D:\bench`.
+    #[test]
+    fn generated_root_matches_the_absolutized_scan_root() {
+        let g = GeneratedScanner::new("/gen", 1, 2, 3);
+        let abs = std::path::absolute("/gen").unwrap();
+        assert_eq!(g.root(), abs);
+        build_index(&g, &abs, VolumeConfig::unix(), &ScanOptions::default()).unwrap();
     }
 
     #[test]

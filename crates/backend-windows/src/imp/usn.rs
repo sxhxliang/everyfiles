@@ -185,7 +185,7 @@ struct Rec {
     usn: i64,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum ParentRef {
     V2(u64),
     V3([u8; 16]),

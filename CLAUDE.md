@@ -81,7 +81,8 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   chains, USN records, fanotify info records) is done on byte slices with
   bounds checks and `read_unaligned`, never by casting to a struct reference.
 - **No dependency with a C build script.** It would break `cargo xtask xcheck`
-  (criterion's `alloca` is why xcheck checks `--lib` only). Prefer `rustix` over
+  (criterion's `alloca` is why xcheck checks `core` with `--lib` only; the
+  backends are also checked with `--profile test --lib`). Prefer `rustix` over
   `libc` where it covers the call; hand-declare FFI only where no pure-Rust
   binding is adequate (FSEvents, fanotify).
 
@@ -97,7 +98,8 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
 - `crates/core/tests/memory.rs` measures real allocation with a counting
   global allocator and asserts the 33-bytes-per-record arithmetic.
 - `cargo xtask xcheck` proves names/signatures/cfg for Linux and Windows from
-  any host. It does **not** prove ABI layout or runtime behaviour.
+  any host, including each backend's `#[cfg(test)]` module (`--profile test
+  --lib`). It does **not** prove ABI layout or runtime behaviour.
 
 ## Conventions
 
