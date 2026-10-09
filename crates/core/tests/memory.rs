@@ -6,7 +6,6 @@
 //! heap allocation. It is alone in this binary so nothing else allocates.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use everyfiles_core::index::{BLOCK, POOL_BLOCK};
@@ -52,13 +51,8 @@ static A: Counting = Counting;
 fn index_memory_matches_the_arithmetic() {
     let g = GeneratedScanner::with_approx_total("/m", 1_000_000);
     let before = LIVE.load(Relaxed);
-    let (idx, _) = build_index(
-        &g,
-        Path::new("/m"),
-        VolumeConfig::unix(),
-        &ScanOptions::default(),
-    )
-    .unwrap();
+    let (idx, _) =
+        build_index(&g, g.root(), VolumeConfig::unix(), &ScanOptions::default()).unwrap();
     let used = LIVE.load(Relaxed) - before;
 
     let n = idx.len();

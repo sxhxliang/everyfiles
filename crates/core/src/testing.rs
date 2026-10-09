@@ -511,13 +511,8 @@ mod generated_tests {
         let g = GeneratedScanner::new("/gen", 2, 3, 5);
         assert_eq!(g.expected_dirs(), 1 + 3 + 9);
         assert_eq!(g.expected_total(), 13 + 13 * 5);
-        let (idx, stats) = build_index(
-            &g,
-            Path::new("/gen"),
-            VolumeConfig::unix(),
-            &ScanOptions::default(),
-        )
-        .unwrap();
+        let (idx, stats) =
+            build_index(&g, g.root(), VolumeConfig::unix(), &ScanOptions::default()).unwrap();
         assert_eq!(idx.len() as u64, g.expected_total());
         assert_eq!(stats.dirs, 13);
         assert_eq!(stats.files, 65);
@@ -537,10 +532,11 @@ mod generated_tests {
     #[test]
     fn generated_names_are_deterministic() {
         let g = GeneratedScanner::new("/gen", 1, 2, 4);
+        let dir = g.root().join("d01");
         let mut a = Vec::new();
         let mut b = Vec::new();
-        g.read_dir(Path::new("/gen/d01"), &mut a).unwrap();
-        g.read_dir(Path::new("/gen/d01"), &mut b).unwrap();
+        g.read_dir(&dir, &mut a).unwrap();
+        g.read_dir(&dir, &mut b).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 4);
     }

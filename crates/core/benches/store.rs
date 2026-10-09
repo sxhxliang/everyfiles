@@ -1,8 +1,6 @@
 //! Persistence at scale: how long a 1M-record index takes to save, to load
 //! (zero-copy mmap plus bounds checks), and to checksum.
 
-use std::path::Path;
-
 use criterion::{Criterion, criterion_group, criterion_main};
 use everyfiles_core::platform::VolumeConfig;
 use everyfiles_core::scan::{ScanOptions, VolumeId, build_index};
@@ -15,13 +13,8 @@ fn bench_store(c: &mut Criterion) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1_000_000);
     let g = GeneratedScanner::with_approx_total("/bench", total);
-    let (idx, _) = build_index(
-        &g,
-        Path::new("/bench"),
-        VolumeConfig::unix(),
-        &ScanOptions::default(),
-    )
-    .expect("generated scan");
+    let (idx, _) = build_index(&g, g.root(), VolumeConfig::unix(), &ScanOptions::default())
+        .expect("generated scan");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bench.idx");
     let meta = SaveMeta {

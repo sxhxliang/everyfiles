@@ -118,3 +118,7 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   both Windows-capable scanners re-stat subdirectories.
 - Keep `core` free of filesystem I/O; even root validation goes through
   `Scanner::root_info`, which is why the synthetic scanner can test everything.
+- Tests that scan with `SyntheticScanner` / `GeneratedScanner` must take the
+  root from the scanner (`s.root()`), never re-spell the literal. The scanners
+  store the absolutized root that `build_index` scans, so `"/syn"` is `D:\syn`
+  on Windows and a literal expectation is wrong there.

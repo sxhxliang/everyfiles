@@ -257,26 +257,25 @@ mod tests {
             "/syn",
             &["a/b/c.txt", "a/d.rs", "e/", "f.md", "a/b/g/h.bin"],
         );
-        let (idx, stats) = build_index(
-            &s,
-            Path::new("/syn"),
-            VolumeConfig::unix(),
-            &ScanOptions::default(),
-        )
-        .unwrap();
+        // Expectations derive from the scanner's root, the absolutized form
+        // `build_index` scans (on Windows `"/syn"` becomes `D:\syn`), so the
+        // assertions hold for whatever prefix and separators the host uses.
+        let root = s.root();
+        let (idx, stats) =
+            build_index(&s, root, VolumeConfig::unix(), &ScanOptions::default()).unwrap();
         let got = all_paths(&idx);
         let want: BTreeSet<PathBuf> = [
-            "/syn/a",
-            "/syn/a/b",
-            "/syn/a/b/c.txt",
-            "/syn/a/b/g",
-            "/syn/a/b/g/h.bin",
-            "/syn/a/d.rs",
-            "/syn/e",
-            "/syn/f.md",
+            "a",
+            "a/b",
+            "a/b/c.txt",
+            "a/b/g",
+            "a/b/g/h.bin",
+            "a/d.rs",
+            "e",
+            "f.md",
         ]
         .into_iter()
-        .map(PathBuf::from)
+        .map(|rel| root.join(rel))
         .collect();
         assert_eq!(got, want);
         assert_eq!(stats.files, 4);
@@ -294,7 +293,7 @@ mod tests {
         let s = SyntheticScanner::from_paths("/syn", &refs);
         let (idx, _) = build_index(
             &s,
-            Path::new("/syn"),
+            s.root(),
             VolumeConfig::unix(),
             &ScanOptions {
                 threads: Some(3),
@@ -311,9 +310,10 @@ mod tests {
     #[test]
     fn max_depth_records_but_does_not_recurse() {
         let s = SyntheticScanner::from_paths("/syn", &["a/b/c/d.txt"]);
+        let root = s.root();
         let (idx, _) = build_index(
             &s,
-            Path::new("/syn"),
+            root,
             VolumeConfig::unix(),
             &ScanOptions {
                 threads: Some(1),
@@ -324,10 +324,7 @@ mod tests {
         let got = all_paths(&idx);
         // depth 0 = root; depth 1 = a (recorded, and we recurse into it since 0 < 1);
         // b is recorded at depth 2 but not recursed into.
-        let want: BTreeSet<PathBuf> = ["/syn/a", "/syn/a/b"]
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
+        let want: BTreeSet<PathBuf> = ["a", "a/b"].into_iter().map(|rel| root.join(rel)).collect();
         assert_eq!(got, want);
     }
 
@@ -335,19 +332,15 @@ mod tests {
     fn unreadable_directory_is_counted_not_fatal() {
         let mut s = SyntheticScanner::from_paths("/syn", &["ok/x.txt", "broken/inner.txt"]);
         s.make_unreadable("broken");
-        let (idx, stats) = build_index(
-            &s,
-            Path::new("/syn"),
-            VolumeConfig::unix(),
-            &ScanOptions::default(),
-        )
-        .unwrap();
+        let root = s.root();
+        let (idx, stats) =
+            build_index(&s, root, VolumeConfig::unix(), &ScanOptions::default()).unwrap();
         let got = all_paths(&idx);
         // The directory itself is still recorded (its parent listed it); its
         // contents are not, and the failure is counted rather than fatal.
-        assert!(got.contains(Path::new("/syn/broken")));
-        assert!(!got.contains(Path::new("/syn/broken/inner.txt")));
-        assert!(got.contains(Path::new("/syn/ok/x.txt")));
+        assert!(got.contains(&root.join("broken")));
+        assert!(!got.contains(&root.join("broken/inner.txt")));
+        assert!(got.contains(&root.join("ok/x.txt")));
         assert_eq!(stats.errors, 1);
     }
 }

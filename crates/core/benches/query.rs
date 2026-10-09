@@ -1,8 +1,6 @@
 //! Query latency at scale. Builds a ~1M-record generated index once, then
 //! times representative needles. Run with `cargo bench -p everyfiles-core`.
 
-use std::path::Path;
-
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use everyfiles_core::platform::VolumeConfig;
 use everyfiles_core::query::{KindFilter, Query, SortKey, search, sort_ids, truncate_top};
@@ -15,13 +13,8 @@ fn bench_query(c: &mut Criterion) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1_000_000);
     let g = GeneratedScanner::with_approx_total("/bench", total);
-    let (idx, stats) = build_index(
-        &g,
-        Path::new("/bench"),
-        VolumeConfig::unix(),
-        &ScanOptions::default(),
-    )
-    .expect("generated scan");
+    let (idx, stats) = build_index(&g, g.root(), VolumeConfig::unix(), &ScanOptions::default())
+        .expect("generated scan");
     eprintln!(
         "index: {} records, {} approx bytes, built in {:.2?}",
         idx.len(),

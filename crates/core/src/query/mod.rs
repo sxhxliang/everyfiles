@@ -343,7 +343,7 @@ mod tests {
     use crate::platform::VolumeConfig;
     use crate::scan::{ScanOptions, build_index};
     use crate::testing::SyntheticScanner;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn fixture() -> Index {
         let s = SyntheticScanner::from_paths(
@@ -359,14 +359,9 @@ mod tests {
                 "日本語/ファイル.txt",
             ],
         );
-        build_index(
-            &s,
-            Path::new("/syn"),
-            VolumeConfig::unix(),
-            &ScanOptions::default(),
-        )
-        .unwrap()
-        .0
+        build_index(&s, s.root(), VolumeConfig::unix(), &ScanOptions::default())
+            .unwrap()
+            .0
     }
 
     fn names(idx: &Index, ids: &[Id]) -> Vec<String> {
