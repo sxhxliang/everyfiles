@@ -82,7 +82,7 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   bounds checks and `read_unaligned`, never by casting to a struct reference.
 - **No dependency with a C build script.** It would break `cargo xtask xcheck`
   (criterion's `alloca` is why xcheck checks `core` with `--lib` only; the
-  backends are also checked with `--profile test --lib`). Prefer `rustix` over
+  backends are also checked with `--tests`). Prefer `rustix` over
   `libc` where it covers the call; hand-declare FFI only where no pure-Rust
   binding is adequate (FSEvents, fanotify).
 
@@ -98,8 +98,8 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
 - `crates/core/tests/memory.rs` measures real allocation with a counting
   global allocator and asserts the 33-bytes-per-record arithmetic.
 - `cargo xtask xcheck` proves names/signatures/cfg for Linux and Windows from
-  any host, including each backend's `#[cfg(test)]` module (`--profile test
-  --lib`). It does **not** prove ABI layout or runtime behaviour.
+  any host, including each backend's unit and integration tests (`--tests`).
+  It does **not** prove ABI layout or runtime behaviour.
 
 ## Conventions
 
@@ -110,5 +110,11 @@ Dependency direction is strictly one-way: backends → `everyfiles-core`;
   `fsobj_type_t` values, most `FAN_*`), which is why some are declared locally.
 - Honest capability reporting: `ScanCaps::provides_size/mtime` and the
   `HAS_SIZE`/`HAS_MTIME` flags must reflect what the backend actually supplied.
+- A directory mtime a scanner records must be what its own `stat_entry` would
+  return for that directory: the open-path spot-check and the incremental sweep
+  compare the two, and a mismatch means a full rescan on every open and a
+  re-list of every directory on every sweep. On NTFS the parent listing's copy
+  (`FindFirstFile`, `FILE_ID_BOTH_DIR_INFO`) is refreshed lazily, which is why
+  both Windows-capable scanners re-stat subdirectories.
 - Keep `core` free of filesystem I/O; even root validation goes through
   `Scanner::root_info`, which is why the synthetic scanner can test everything.

@@ -90,7 +90,24 @@ impl Scanner for GenericScanner {
             let kind = kind_of(&ft);
             // `DirEntry::metadata` does not follow symlinks, so this reports the
             // link itself for `Kind::Symlink`, which is what the index wants.
-            let (size, mtime) = match entry.metadata() {
+            //
+            // On Windows it is served from the parent's directory listing,
+            // which NTFS refreshes lazily: a subdirectory's last-write time
+            // there can lag the directory's own record until that directory
+            // is next opened. The `FindFirstFileW` remarks say so ("file
+            // attribute information on NTFS file systems may not be current")
+            // and name `GetFileInformationByHandle` as the authoritative call,
+            // which is what `symlink_metadata` uses. The engine's spot-check
+            // and sweep compare against that handle-based stat, so directories
+            // are re-stat'ed through it here. Files are left alone: their copy
+            // is refreshed on close, and re-stat'ing every file would turn the
+            // listing into a per-entry open.
+            let md = if cfg!(windows) && kind == Kind::Dir {
+                std::fs::symlink_metadata(entry.path())
+            } else {
+                entry.metadata()
+            };
+            let (size, mtime) = match md {
                 Ok(md) => (Some(md.len()), md.modified().ok().map(system_time_to_ns)),
                 Err(_) => (None, None),
             };

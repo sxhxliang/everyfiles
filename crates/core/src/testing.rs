@@ -29,7 +29,9 @@ pub struct SyntheticScanner {
 
 impl SyntheticScanner {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        // Same form `build_index` compares against; see `GeneratedScanner::new`.
         let root = root.into();
+        let root = std::path::absolute(&root).unwrap_or(root);
         let mut dirs = HashMap::new();
         dirs.insert(root.clone(), Vec::new());
         Self {

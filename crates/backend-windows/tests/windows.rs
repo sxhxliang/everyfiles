@@ -46,7 +46,9 @@ fn read_dir_matches_std_exactly() {
     let mut want = BTreeMap::new();
     for entry in std::fs::read_dir(&root).unwrap() {
         let entry = entry.unwrap();
-        let md = entry.metadata().unwrap();
+        // Handle-based, like the oracle: the scanner deliberately does not
+        // reproduce the listing's lazily refreshed directory timestamps.
+        let md = std::fs::symlink_metadata(entry.path()).unwrap();
         let kind = if md.is_dir() { Kind::Dir } else { Kind::File };
         want.insert(
             entry.file_name().as_encoded_bytes().to_vec(),

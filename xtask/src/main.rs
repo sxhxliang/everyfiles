@@ -16,11 +16,13 @@ const CHECKS: &[(&str, &str)] = &[
     ("everyfiles-core", "x86_64-pc-windows-msvc"),
 ];
 
-/// The same backends, checked with `cfg(test)` on. A backend's test module is
-/// otherwise never type-checked off its own OS, which is how a
+/// The same backends, with their unit and integration tests. A backend's
+/// test code is otherwise never type-checked off its own OS, which is how a
 /// `ParentRef: Debug` gap shipped through a green `xcheck` and broke the
-/// Windows leg. `core` is left out on purpose: its dev-dependencies pull in
-/// criterion, whose `alloca` build script needs a cross C toolchain.
+/// Windows leg. Their dev-dependencies (tempfile, walkdir, the testkit) are
+/// pure Rust, so this works; `core` is left out on purpose because its
+/// dev-dependencies pull in criterion, whose `alloca` build script needs a
+/// cross C toolchain.
 const TEST_CHECKS: &[(&str, &str)] = &[
     ("everyfiles-backend-windows", "x86_64-pc-windows-msvc"),
     ("everyfiles-backend-windows", "i686-pc-windows-msvc"),
@@ -42,24 +44,17 @@ fn main() -> ExitCode {
 fn xcheck() -> ExitCode {
     let mut failed = false;
     // `--lib` for the packages whose dev-dependency tree cannot be built for a
-    // foreign target, `--profile test --lib` for the backends so their test
-    // modules are type-checked too. Neither links, so both stay cheap; ABI
+    // foreign target, `--tests` for the backends so their unit and integration
+    // tests are type-checked too. Neither links, so both stay cheap; ABI
     // layout and runtime behaviour still need CI on the matching OS.
     let runs = CHECKS
         .iter()
         .map(|&(pkg, target)| vec!["check", "-p", pkg, "--target", target, "--lib"])
-        .chain(TEST_CHECKS.iter().map(|&(pkg, target)| {
-            vec![
-                "check",
-                "-p",
-                pkg,
-                "--target",
-                target,
-                "--profile",
-                "test",
-                "--lib",
-            ]
-        }));
+        .chain(
+            TEST_CHECKS
+                .iter()
+                .map(|&(pkg, target)| vec!["check", "-p", pkg, "--target", target, "--tests"]),
+        );
     for args in runs {
         eprintln!("==> cargo {}", args.join(" "));
         let status = Command::new(env!("CARGO")).args(args).status();

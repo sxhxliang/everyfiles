@@ -2,6 +2,14 @@
 //! directory, which returns name, size, mtime, attributes, and file id in
 //! bulk with no per-file call and no elevation. Works on NTFS, ReFS, and FAT.
 //!
+//! The one addition is a `symlink_metadata` per *subdirectory*: the listing
+//! is the same lazily refreshed directory-index copy that `FindFirstFile`
+//! reads, and NTFS does not update a subdirectory's last-write time there
+//! until that directory is next opened. The engine's spot-check and sweep
+//! compare recorded directory mtimes against a handle-based stat, so the
+//! scanner records that value rather than the stale copy (see
+//! `GenericScanner::read_dir` for the SDK reference).
+//!
 //! The NTFS USN journal (elevated) is a separate, later tier: it is faster
 //! for cold enumeration and is the watcher's resumable position, but it
 //! carries neither size nor mtime, so this walk is what supplies them.
@@ -12,7 +20,7 @@ use everyfiles_backend_generic::GenericScanner;
 use everyfiles_core::platform::NameEncoding;
 use everyfiles_core::scan::{
     EntryAttrs, EntryStat, Kind, ProbeReport, RawEntry, RootInfo, ScanCaps, ScanMode, Scanner,
-    VolumeId, VolumeIdKind, name_bytes,
+    VolumeId, VolumeIdKind, name_bytes, system_time_to_ns,
 };
 use everyfiles_core::{Error, Result};
 
@@ -62,11 +70,22 @@ impl WindowsScanner {
                 if e.is_reparse() {
                     attrs |= EntryAttrs::REPARSE;
                 }
+                // Authoritative mtime for directories (module docs). A stat
+                // that fails because the directory vanished mid-listing keeps
+                // the listed value; the engine's reconcile handles the rest.
+                let mtime = if kind == Kind::Dir {
+                    std::fs::symlink_metadata(dir.join(&e.name))
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map_or(e.mtime_ns, system_time_to_ns)
+                } else {
+                    e.mtime_ns
+                };
                 out.push(RawEntry {
                     name: name_bytes(&e.name).into(),
                     kind,
                     size: Some(e.size),
-                    mtime: Some(e.mtime_ns),
+                    mtime: Some(mtime),
                     native_id: Some(e.file_id),
                     native_parent: None,
                     attrs: EntryAttrs(attrs),
