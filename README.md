@@ -100,7 +100,8 @@ character by the initial or any prefix of one of its readings: `pysousuo`
 finds `拼音搜索`, `pysousuoeve` finds `拼音搜索Everything`, `cq` finds `重庆`.
 The run has to be contiguous, like a substring (`pyev` does not match
 `拼音搜索Everything`), every reading of a polyphone counts, `ü` is typed `v`
-or `u`, and a Han character pasted into the query matches itself. Always
+or `u`, and a Han character pasted into the query matches itself, so the two
+mix freely: `拼音sousuoeve` finds `拼音搜索Everything` as well. Always
 case-insensitive; `--exact` requires the whole name to be covered; not
 combinable with `*`/`?`. The library crates keep this behind the `pinyin`
 feature (off by default); the CLI turns it on.
@@ -169,7 +170,9 @@ feature (off by default); the CLI turns it on.
 - **Pinyin is prefix-of-reading, not fuzzy.** `s`, `so` and `sou` consume 搜;
   `su` does not. Readings are tone-less; a character without one (emoji,
   kana) is matched only by itself. A tree whose names are all Chinese pays
-  the DP on every record (about 20 ms per million names).
+  the DP on every record (about 20 ms per million names). Traditional and
+  simplified forms are different characters: `長` in a query does not find
+  `长`, though `chang` finds both.
 - **No regex.** Substrings and `*`/`?` globs only. A glob with no run of two
   or more literal characters (such as `*a*`) cannot use the SIMD prefilter and
   tests every name; that is correct but slower.

@@ -200,6 +200,10 @@ mod tests {
             "pysousuo",
             "pysousuoeve",
             "pysousuoeverything",
+            "拼音sousuoeve",
+            "拼音ss",
+            "py搜索",
+            "搜索sousuo",
             "sousuo",
             "ss",
             "bg",
@@ -238,6 +242,20 @@ mod tests {
         let got = names(
             &idx,
             &query_search(&idx, &query("wdssgj", false)).unwrap().ids,
+        );
+        assert_eq!(got, ["我的搜索工具"]);
+
+        // Han characters and pinyin mixed in one needle.
+        let got = names(
+            &idx,
+            &query_search(&idx, &query("拼音sousuoeve", false))
+                .unwrap()
+                .ids,
+        );
+        assert_eq!(got, ["拼音搜索Everything.txt"]);
+        let got = names(
+            &idx,
+            &query_search(&idx, &query("wd搜索gj", false)).unwrap().ids,
         );
         assert_eq!(got, ["我的搜索工具"]);
 

@@ -97,7 +97,9 @@ enum Cmd {
         /// Read the query as pinyin: each letter matches an ASCII character
         /// or part of a Han character's reading, as its initial or as a prefix
         /// of it, so `pysousuo` finds 拼音搜索 and `pysousuoeve` finds
-        /// 拼音搜索Everything. With `--exact` the whole name must be covered.
+        /// 拼音搜索Everything; a Han character in the query matches itself, so
+        /// `拼音sousuoeve` finds it too. With `--exact` the whole name must be
+        /// covered.
         /// Always case-insensitive; cannot be combined with `*` or `?`.
         #[cfg(feature = "pinyin")]
         #[arg(long, conflicts_with = "case_sensitive")]

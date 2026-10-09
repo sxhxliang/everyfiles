@@ -15,6 +15,11 @@
 //! of `Everything` — and `sousuo` matches `我的搜索工具` starting mid-name.
 //! Letters are never skipped, so `pyev` does not match `拼音搜索Everything`.
 //!
+//! A Han character in the needle matches itself, and only itself, so the two
+//! kinds mix freely: `拼音sousuoeve` matches `拼音搜索Everything` too, and
+//! `pin音` matches `拼音`. Traditional and simplified forms are different
+//! characters (`長` does not find `长`; `chang` finds both).
+//!
 //! A character with no reading (an emoji, kana, a Cyrillic letter) is opaque:
 //! only the same character in the needle consumes it. Invalid UTF-8 bytes are
 //! skipped instead of becoming replacement characters, so they can never break
@@ -299,6 +304,7 @@ fn utf8_len(b: u8) -> usize {
 /// use everyfiles_core::pinyin;
 /// assert!(pinyin::matches("pysousuoeve", "拼音搜索Everything"));
 /// assert!(pinyin::matches("sousuo", "我的搜索工具"));
+/// assert!(pinyin::matches("拼音sousuoeve", "拼音搜索Everything"));
 /// assert!(!pinyin::matches("pyev", "拼音搜索Everything"));
 /// # }
 /// ```
@@ -396,6 +402,25 @@ mod tests {
         assert!(matches("搜索", "我的搜索工具"));
         assert!(matches("拼音搜索", "拼音搜索Everything"));
         assert!(!matches("搜索", "我的工具"));
+    }
+
+    #[test]
+    fn han_characters_and_pinyin_mix_in_one_needle() {
+        assert!(matches("拼音sousuoeve", "拼音搜索Everything"));
+        assert!(拼音_匹配("拼音sousuoeve", "拼音搜索Everything"));
+        assert!(matches("拼音ss", "拼音搜索Everything"));
+        assert!(matches("py搜索", "拼音搜索Everything"));
+        assert!(matches("py搜索eve", "拼音搜索Everything"));
+        assert!(matches("pin音", "拼音"));
+        assert!(matches("搜索eve", "拼音搜索Everything"));
+        // The Han part is literal: it does not stand for its reading, and
+        // the run still may not skip.
+        assert!(!matches("搜索sousuo", "拼音搜索Everything"));
+        assert!(!matches("拼音eve", "拼音搜索Everything"));
+        // Traditional and simplified forms are different characters.
+        assert!(!matches("長", "长"));
+        assert!(matches("chang", "长"));
+        assert!(matches("chang", "長"));
     }
 
     #[test]
