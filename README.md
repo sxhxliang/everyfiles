@@ -88,6 +88,11 @@ Output formats: `human` (default on a tty), `tsv` (default when piped),
 `%LOCALAPPDATA%\everyfiles\cache`). `--backend generic` forces the portable
 path on any host.
 
+A small GUI over the same engine lives in `demos/gpui` (Zed's gpui):
+`cd demos/gpui && cargo run --release -- ~/Documents` opens a window that
+searches as you type, with a pinyin toggle. It is a standalone crate, not a
+workspace member, so the engine's build and tests never pull in gpui.
+
 Queries are case-insensitive substrings by default. A query containing `*` or
 `?` is matched as a whole-name glob instead (`'*.rs'`, `'IMG_????.JPG'`;
 `?` is one character, so `'?.txt'` matches `日.txt`), quoted so the shell does
@@ -213,6 +218,7 @@ crates/backend-linux    everyfiles-backend-linux     getdents64 + fanotify/inoti
 crates/backend-windows  everyfiles-backend-windows   FileIdBothDirectoryInfo + USN/RDCW
 crates/testkit          everyfiles-testkit     synthetic scanners, naive oracle, fixtures
 crates/cli              everyfiles-cli         the `everyfiles` binary
+demos/gpui              everyfiles-gpui-demo   standalone gpui window over the engine (not a workspace member)
 xtask                                          cargo xtask xcheck
 ```
 

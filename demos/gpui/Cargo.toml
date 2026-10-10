@@ -1,0 +1,19 @@
+[package]
+name = "everyfiles-gpui-demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A small gpui window over the everyfiles engine: type, see matches, toggle pinyin"
+
+# Standalone on purpose: not a member of the repository workspace, so the
+# large gpui tree (which also needs a display server) never enters
+# `cargo test --workspace`, `cargo xtask xcheck` or CI.
+[workspace]
+
+[dependencies]
+everyfiles = { path = "../../crates/everyfiles", features = ["pinyin"] }
+gpui = "0.2.2"
+unicode-segmentation = "1"
+
+[profile.release]
+debug = 1
