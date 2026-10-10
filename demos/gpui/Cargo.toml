@@ -14,6 +14,7 @@ description = "A small gpui window over the everyfiles engine: type, see matches
 everyfiles = { path = "../../crates/everyfiles", features = ["pinyin"] }
 gpui = "0.2.2"
 unicode-segmentation = "1"
+futures = "0.3"
 
 [profile.release]
 debug = 1

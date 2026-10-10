@@ -13,19 +13,32 @@
 //! rescanning. The search box is adapted from gpui's own `input` example so
 //! Chinese IME input works; everything else is a few `div`s.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use everyfiles::core::arc_swap::ArcSwap;
+use everyfiles::engine::{UpdateStats, Updater};
 use everyfiles::query::{self, Query, SortKey};
-use everyfiles::{BackendOptions, Id, Index, OpenOptions, OpenOutcome, host_volume_config};
+use everyfiles::scan::VolumeId;
+use everyfiles::store::SaveMeta;
+use everyfiles::watch::PollOutcome;
+use everyfiles::{
+    BackendDef, BackendOptions, Id, Index, OpenOptions, OpenOutcome, ResumeToken, Scanner,
+    WatchEvent, Watcher, host_volume_config,
+};
+use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    App, Application, Bounds, ClipboardItem, Context, CursorStyle, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, FontWeight,
-    GlobalElementId, InspectorElementId, KeyBinding, LayoutId, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, TitlebarOptions, UTF16Selection, UnderlineStyle, Window,
-    WindowBounds, WindowOptions, actions, div, fill, hsla, point, prelude::*, px, relative, rgb,
-    rgba, size, uniform_list,
+    Animation, AnimationExt as _, App, Application, AssetSource, Bounds, ClipboardItem, Context,
+    CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
+    Focusable, FontWeight, GlobalElementId, InspectorElementId, KeyBinding, LayoutId, PaintQuad,
+    Pixels, ShapedLine, SharedString, Style, TextRun, TitlebarOptions, Transformation,
+    UTF16Selection, UnderlineStyle, Window, WindowBounds, WindowOptions, actions, div, fill, hsla,
+    percentage, point, prelude::*, px, relative, rgb, rgba, size, svg, uniform_list,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -46,6 +59,7 @@ actions!(
         Cut,
         Clear,
         TogglePinyin,
+        Reindex,
         Quit,
     ]
 );
@@ -63,6 +77,32 @@ const DIM: u32 = 0x7f849c;
 const ACCENT: u32 = 0x89b4fa;
 const DIR: u32 = 0xf9e2af;
 const ERR: u32 = 0xf38ba8;
+
+/// The one icon this demo draws. gpui loads SVGs through an [`AssetSource`]
+/// and tints them with the element's text colour, so a stroke icon is enough.
+/// Shape: Lucide `refresh-cw` (ISC).
+const REFRESH_ICON: &str = "icons/refresh.svg";
+const REFRESH_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>"##;
+
+/// Serves the embedded icon; everything else is "not found".
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        let found = path == REFRESH_ICON;
+        if std::env::var_os("EVERYFILES_DEMO_TRACE").is_some() {
+            eprintln!(
+                "trace: asset {path:?} -> {}",
+                if found { "served" } else { "missing" }
+            );
+        }
+        Ok(found.then(|| Cow::Borrowed(REFRESH_SVG.as_bytes())))
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(vec![REFRESH_ICON.into()])
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Search box: gpui's `input` example, trimmed to what a one-line query needs.
@@ -99,6 +139,40 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Clamp a byte range into the current content, on char boundaries. The
+    /// platform IME keeps its own idea of the text and can send a range that
+    /// no longer fits (right after `reset`, for instance); these handlers are
+    /// called from Objective-C, where a panic aborts the process.
+    fn clamp(&self, range: Range<usize>) -> Range<usize> {
+        let len = self.content.len();
+        let mut start = range.start.min(len);
+        while !self.content.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = range.end.min(len).max(start);
+        while !self.content.is_char_boundary(end) {
+            end -= 1;
+        }
+        start..end.max(start)
+    }
+
+    /// The text to search for. While a Chinese IME is composing, the marked
+    /// text carries its syllable separators (`pin'yin`); drop those so the
+    /// list already follows the pinyin before anything is committed.
+    fn query(&self) -> String {
+        match &self.marked_range {
+            Some(r) => {
+                let r = self.clamp(r.clone());
+                let mut q = String::with_capacity(self.content.len());
+                q.push_str(&self.content[..r.start]);
+                q.extend(self.content[r.clone()].chars().filter(|&c| c != '\''));
+                q.push_str(&self.content[r.end..]);
+                q
+            }
+            None => self.content.to_string(),
+        }
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -259,7 +333,7 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
+        let range = self.clamp(self.range_from_utf16(&range_utf16));
         actual_range.replace(self.range_to_utf16(&range));
         Some(self.content[range].to_string())
     }
@@ -302,6 +376,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamp(range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -324,6 +399,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = self.clamp(range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -333,11 +409,13 @@ impl EntityInputHandler for TextInput {
         } else {
             self.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
+        // The new selection is relative to the replaced range's start.
+        let selected = new_selected_range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range = self.clamp(selected);
         cx.notify();
     }
 
@@ -349,7 +427,7 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let last_layout = self.last_layout.as_ref()?;
-        let range = self.range_from_utf16(&range_utf16);
+        let range = self.clamp(self.range_from_utf16(&range_utf16));
         Some(Bounds::from_corners(
             point(
                 bounds.left() + last_layout.x_for_index(range.start),
@@ -599,7 +677,229 @@ impl Focusable for TextInput {
 }
 
 // ---------------------------------------------------------------------------
-// The window: header with the pinyin toggle, the search box, status, results.
+// Live updates: the backend's watcher runs on its own thread, applies each
+// batch to an `Updater`, publishes a snapshot and tells the window. ⌘R asks
+// that thread for a directory-mtime sweep, the same catch-up the engine does
+// after an event overflow, instead of a full rescan.
+// ---------------------------------------------------------------------------
+
+/// Record counts a batch or sweep changed.
+#[derive(Clone, Copy, Debug)]
+struct Delta {
+    added: u64,
+    removed: u64,
+    updated: u64,
+}
+
+impl Delta {
+    fn between(before: UpdateStats, after: UpdateStats) -> Self {
+        Self {
+            added: after.added - before.added,
+            removed: after.removed - before.removed,
+            updated: after.updated - before.updated,
+        }
+    }
+}
+
+/// What the watch thread tells the window.
+enum Notice {
+    Started {
+        active: &'static str,
+        swept: Option<Delta>,
+    },
+    Batch {
+        events: usize,
+        overflow: bool,
+        delta: Delta,
+    },
+    Swept {
+        delta: Delta,
+        dirs: u64,
+        elapsed: Duration,
+    },
+    Failed(String),
+}
+
+/// The window's side of the watch thread.
+#[derive(Clone)]
+struct WatchHandle {
+    published: Arc<ArcSwap<Index>>,
+    sweep_requested: Arc<AtomicBool>,
+}
+
+/// Everything the watch thread owns.
+struct WatchSetup {
+    index: Index,
+    scanner: Box<dyn Scanner>,
+    watcher: Box<dyn Watcher>,
+    token: Option<ResumeToken>,
+    root: PathBuf,
+    index_path: PathBuf,
+    vid: VolumeId,
+}
+
+/// Coalesce events for this long before applying a batch.
+const DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long one idle poll waits; bounds the latency of a ⌘R request.
+const POLL: Duration = Duration::from_millis(250);
+/// Persist (with the resume token) at least this often while events flow.
+const SAVE_EVERY: Duration = Duration::from_secs(10);
+
+fn spawn_watch(setup: WatchSetup, handle: WatchHandle, tx: UnboundedSender<Notice>) {
+    std::thread::Builder::new()
+        .name("everyfiles-watch".into())
+        .spawn(move || {
+            if let Err(e) = watch_thread(setup, &handle, &tx) {
+                let _ = tx.unbounded_send(Notice::Failed(e.to_string()));
+            }
+        })
+        .expect("spawn the watch thread");
+}
+
+fn watch_thread(
+    setup: WatchSetup,
+    handle: &WatchHandle,
+    tx: &UnboundedSender<Notice>,
+) -> everyfiles::Result<()> {
+    let WatchSetup {
+        index,
+        scanner,
+        mut watcher,
+        token,
+        root,
+        index_path,
+        vid,
+    } = setup;
+    let trace = std::env::var_os("EVERYFILES_DEMO_TRACE").is_some();
+    let mut updater = Updater::new(index, scanner.as_ref());
+    let active = watcher.probe(&root).map(|p| p.active).unwrap_or("?");
+    let replaying = match watcher.start(&root, token.as_ref()) {
+        Ok(()) => watcher.capabilities().resumable && token.is_some(),
+        Err(everyfiles::Error::TokenStale) => {
+            watcher.start(&root, None)?;
+            false
+        }
+        Err(e) => return Err(e),
+    };
+    // Without a resume token the saved index may have missed changes made
+    // while nothing was watching; a directory-mtime sweep catches up.
+    let swept = (!replaying).then(|| sweep(&mut updater));
+    publish(handle, &updater);
+    if trace {
+        eprintln!("trace: watcher {active} started, replaying={replaying}, swept={swept:?}");
+    }
+    let _ = tx.unbounded_send(Notice::Started {
+        active,
+        swept: swept.map(|(d, _, _)| d),
+    });
+
+    let mut events: Vec<WatchEvent> = Vec::new();
+    let mut last_save = Instant::now();
+    loop {
+        if handle.sweep_requested.swap(false, Ordering::AcqRel) {
+            let (delta, dirs, elapsed) = sweep(&mut updater);
+            publish(handle, &updater);
+            persist(&updater, watcher.as_ref(), &index_path, &vid)?;
+            last_save = Instant::now();
+            if trace {
+                eprintln!("trace: sweep {delta:?} dirs={dirs} in {elapsed:.2?}");
+            }
+            let _ = tx.unbounded_send(Notice::Swept {
+                delta,
+                dirs,
+                elapsed,
+            });
+        }
+        let first = watcher.poll(POLL, &mut events)?;
+        if first == PollOutcome::Closed {
+            break;
+        }
+        if events.is_empty() {
+            if last_save.elapsed() >= SAVE_EVERY {
+                persist(&updater, watcher.as_ref(), &index_path, &vid)?;
+                last_save = Instant::now();
+            }
+            continue;
+        }
+        let deadline = Instant::now() + DEBOUNCE;
+        while Instant::now() < deadline {
+            match watcher.poll(
+                deadline.saturating_duration_since(Instant::now()),
+                &mut events,
+            )? {
+                PollOutcome::Events(_) => {}
+                PollOutcome::Timeout | PollOutcome::Closed => break,
+            }
+        }
+        let before = updater.stats;
+        let count = events.len();
+        let mut overflow = false;
+        for ev in events.drain(..) {
+            match ev {
+                WatchEvent::Path { path, deep, .. } => updater.reconcile_path(&path, deep),
+                WatchEvent::Overflow | WatchEvent::RescanNeeded => {
+                    overflow = true;
+                    updater.sweep();
+                }
+            }
+        }
+        let compacted = updater.maybe_compact(10_000);
+        publish(handle, &updater);
+        if last_save.elapsed() >= SAVE_EVERY || compacted {
+            persist(&updater, watcher.as_ref(), &index_path, &vid)?;
+            last_save = Instant::now();
+        }
+        let delta = Delta::between(before, updater.stats);
+        if trace {
+            eprintln!("trace: batch {count} events {delta:?} overflow={overflow}");
+        }
+        let _ = tx.unbounded_send(Notice::Batch {
+            events: count,
+            overflow,
+            delta,
+        });
+    }
+    persist(&updater, watcher.as_ref(), &index_path, &vid)?;
+    Ok(())
+}
+
+fn sweep(updater: &mut Updater<'_>) -> (Delta, u64, Duration) {
+    let t0 = Instant::now();
+    let before = updater.stats;
+    updater.sweep();
+    let after = updater.stats;
+    (
+        Delta::between(before, after),
+        after.dirs_listed - before.dirs_listed,
+        t0.elapsed(),
+    )
+}
+
+fn publish(handle: &WatchHandle, updater: &Updater<'_>) {
+    handle.published.store(Arc::new(updater.snapshot()));
+}
+
+fn persist(
+    updater: &Updater<'_>,
+    watcher: &dyn Watcher,
+    path: &std::path::Path,
+    vid: &VolumeId,
+) -> everyfiles::Result<()> {
+    let token = watcher.resume_token();
+    everyfiles::store::save(
+        updater.index(),
+        path,
+        &SaveMeta {
+            volume_id: vid,
+            resume_token: &token.0,
+        },
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The window: header with the pinyin toggle, the search box, status, results,
+// and the re-index button.
 // ---------------------------------------------------------------------------
 
 struct Row {
@@ -608,10 +908,26 @@ struct Row {
     is_dir: bool,
 }
 
+/// What `main` opened, handed to the view.
+struct Opened {
+    index: Arc<Index>,
+    source: String,
+    root: PathBuf,
+    index_path: PathBuf,
+    backend: &'static BackendDef,
+    watch: Option<(WatchHandle, UnboundedReceiver<Notice>)>,
+}
+
 struct SearchDemo {
-    index: Index,
+    index: Arc<Index>,
     root: SharedString,
     source: SharedString,
+    live: SharedString,
+    root_path: PathBuf,
+    index_path: PathBuf,
+    backend: &'static BackendDef,
+    watch: Option<WatchHandle>,
+    reindexing: bool,
     input: Entity<TextInput>,
     pinyin: bool,
     rows: Vec<Row>,
@@ -622,17 +938,44 @@ struct SearchDemo {
 }
 
 impl SearchDemo {
-    fn new(index: Index, source: String, cx: &mut Context<Self>) -> Self {
+    fn new(opened: Opened, cx: &mut Context<Self>) -> Self {
         let input = cx.new(TextInput::new);
-        // Every edit (typing, IME commit, paste, clear) notifies the input;
-        // re-run the query on each.
+        // Every edit (typing, IME composition, paste, clear) notifies the
+        // input; re-run the query on each.
         cx.observe(&input, |this, _, cx| this.run_search(cx))
             .detach();
-        let root = index.root_path().to_string_lossy().into_owned();
+        let (watch, rx) = match opened.watch {
+            Some((handle, rx)) => (Some(handle), Some(rx)),
+            None => (None, None),
+        };
+        if let Some(mut rx) = rx {
+            cx.spawn(async move |this, cx| {
+                while let Some(notice) = rx.next().await {
+                    if this
+                        .update(cx, |this, cx| this.apply_notice(notice, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        let root = opened.index.root_path().to_string_lossy().into_owned();
         let mut this = Self {
-            index,
+            index: opened.index,
             root: root.into(),
-            source: source.into(),
+            source: opened.source.into(),
+            live: if watch.is_some() {
+                "正在启动监听…".into()
+            } else {
+                "没有监听器，改动需要 ⌘R".into()
+            },
+            root_path: opened.root,
+            index_path: opened.index_path,
+            backend: opened.backend,
+            watch,
+            reindexing: false,
             input,
             pinyin: true,
             rows: Vec::new(),
@@ -645,8 +988,58 @@ impl SearchDemo {
         this
     }
 
+    /// A message from the watch thread: take the newest snapshot, say what
+    /// changed, and re-run the query so new names show up by themselves.
+    fn apply_notice(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        if let Some(w) = &self.watch {
+            self.index = w.published.load_full();
+        }
+        self.live = match notice {
+            Notice::Started { active, swept } => match swept {
+                Some(d) => format!(
+                    "监听中（{active}），启动补扫 +{} -{} ~{}",
+                    d.added, d.removed, d.updated
+                ),
+                None => format!("监听中（{active}），已回放上次保存后的事件"),
+            },
+            Notice::Batch {
+                events,
+                overflow,
+                delta,
+            } => format!(
+                "监听中，最近一批 {events} 个事件：+{} -{} ~{}{}",
+                delta.added,
+                delta.removed,
+                delta.updated,
+                if overflow {
+                    "（队列溢出，已补扫）"
+                } else {
+                    ""
+                }
+            ),
+            Notice::Swept {
+                delta,
+                dirs,
+                elapsed,
+            } => {
+                self.reindexing = false;
+                format!(
+                    "重新索引：列了 {dirs} 个目录，+{} -{} ~{}，{elapsed:.2?}",
+                    delta.added, delta.removed, delta.updated
+                )
+            }
+            Notice::Failed(e) => {
+                self.reindexing = false;
+                self.watch = None;
+                format!("监听停止：{e}；⌘R 现在做全量重扫")
+            }
+        }
+        .into();
+        self.run_search(cx);
+    }
+
     fn run_search(&mut self, cx: &mut Context<Self>) {
-        let needle = self.input.read(cx).content.to_string();
+        let needle = self.input.read(cx).query();
         self.execute(needle);
         cx.notify();
     }
@@ -713,6 +1106,100 @@ impl SearchDemo {
         let handle = self.input.read(cx).focus_handle.clone();
         window.focus(&handle);
     }
+
+    /// With a watcher running, ask it for a directory-mtime sweep: it re-lists
+    /// every directory whose mtime moved, which is what a stale index needs
+    /// and far cheaper than a rescan. Without one, rescan on a background
+    /// thread (the same `engine::open` with `force_rescan`, which also saves).
+    fn reindex(&mut self, _: &Reindex, _: &mut Window, cx: &mut Context<Self>) {
+        if self.reindexing {
+            return;
+        }
+        self.reindexing = true;
+        cx.notify();
+        if let Some(w) = &self.watch {
+            w.sweep_requested.store(true, Ordering::Release);
+            return;
+        }
+        let root = self.root_path.clone();
+        let index_path = self.index_path.clone();
+        let backend = self.backend;
+        let task = cx.background_executor().spawn(async move {
+            let t0 = Instant::now();
+            let scanner = (backend.make_scanner)(&BackendOptions::default())?;
+            let opts = OpenOptions {
+                force_rescan: true,
+                ..OpenOptions::default()
+            };
+            let (index, _) = everyfiles::engine::open(
+                scanner.as_ref(),
+                &root,
+                &index_path,
+                host_volume_config(),
+                &opts,
+            )?;
+            Ok::<_, everyfiles::Error>((index, t0.elapsed()))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.reindexing = false;
+                match result {
+                    Ok((index, elapsed)) => {
+                        this.index = Arc::new(index);
+                        this.live = format!("全量重扫用了 {elapsed:.2?}").into();
+                        this.run_search(cx);
+                    }
+                    Err(e) => {
+                        this.error = Some(format!("重新索引失败：{e}").into());
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The bottom-right button: the refresh icon, spinning while work runs.
+    fn reindex_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let busy = self.reindexing;
+        let icon = svg()
+            .size_4()
+            .flex_none()
+            .path(REFRESH_ICON)
+            .text_color(if busy { rgb(ACCENT) } else { rgb(TEXT) });
+        let icon = if busy {
+            icon.with_animation(
+                "reindex-spin",
+                Animation::new(Duration::from_secs(1)).repeat(),
+                |svg, delta| svg.with_transformation(Transformation::rotate(percentage(delta))),
+            )
+            .into_any_element()
+        } else {
+            icon.into_any_element()
+        };
+        div()
+            .id("reindex")
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(rgb(PANEL))
+            .hover(|s| s.bg(rgb(BORDER)))
+            .child(icon)
+            .child(div().text_xs().child(if busy {
+                "正在重新索引…"
+            } else {
+                "重新索引　⌘R"
+            }))
+            .on_click(cx.listener(|this, _, window, cx| this.reindex(&Reindex, window, cx)))
+    }
 }
 
 impl Render for SearchDemo {
@@ -737,6 +1224,7 @@ impl Render for SearchDemo {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_pinyin))
             .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::reindex))
             .size_full()
             .flex()
             .flex_col()
@@ -794,6 +1282,7 @@ impl Render for SearchDemo {
             )
             .child(self.input.clone())
             .child(div().text_color(rgb(status_color)).child(status))
+            .child(div().text_xs().text_color(rgb(DIM)).child(self.live.clone()))
             .child(
                 div()
                     .flex_1()
@@ -844,9 +1333,18 @@ impl Render for SearchDemo {
                         .h_full(),
                     ),
             )
-            .child(div().text_xs().text_color(rgb(DIM)).child(
-                "输入即搜索 · ⌘P 切换拼音 · esc 清空 · ⌘Q 退出 · 例：pysousuo → 拼音搜索，cq → 重庆，拼音sousuo 混排亦可",
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(div().flex_1().truncate().text_xs().text_color(rgb(DIM)).child(
+                        "输入即搜索，文件系统变动自动更新 · ⌘P 切换拼音 · ⌘R 重新索引 · esc 清空 · ⌘Q 退出 · 例：pysousuo → 拼音搜索，cq → 重庆",
+                    ))
+                    .child(self.reindex_button(cx)),
+            )
     }
 }
 
@@ -878,6 +1376,12 @@ fn main() {
         eprintln!("everyfiles demo: {e}");
         std::process::exit(1)
     });
+    let token = match &outcome {
+        OpenOutcome::Loaded { resume_token, .. } if !resume_token.is_empty() => {
+            Some(ResumeToken(resume_token.clone()))
+        }
+        _ => None,
+    };
     let source = match outcome {
         OpenOutcome::Loaded { .. } => format!("加载已保存的索引用了 {:.2?}", t0.elapsed()),
         OpenOutcome::Rescanned { reason, .. } => {
@@ -886,52 +1390,97 @@ fn main() {
     };
     eprintln!("everyfiles demo: {} records, {source}", index.live_count());
 
-    Application::new().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("backspace", Backspace, None),
-            KeyBinding::new("delete", Delete, None),
-            KeyBinding::new("left", Left, None),
-            KeyBinding::new("right", Right, None),
-            KeyBinding::new("shift-left", SelectLeft, None),
-            KeyBinding::new("shift-right", SelectRight, None),
-            KeyBinding::new("home", Home, None),
-            KeyBinding::new("end", End, None),
-            KeyBinding::new("cmd-a", SelectAll, None),
-            KeyBinding::new("cmd-v", Paste, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("cmd-x", Cut, None),
-            KeyBinding::new("escape", Clear, None),
-            KeyBinding::new("cmd-p", TogglePinyin, None),
-            KeyBinding::new("cmd-q", Quit, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-
-        let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("everyfiles".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+    // The watcher keeps the index current while the window is open. Its
+    // thread owns the scanner; the window only ever sees published snapshots.
+    let vid = scanner
+        .volume_id(&root)
+        .unwrap_or_else(|_| VolumeId::none());
+    let snapshot = Arc::new(index.clone());
+    let watch = match (backend.make_watcher)(&BackendOptions::default()) {
+        Ok(watcher) => {
+            let handle = WatchHandle {
+                published: Arc::new(ArcSwap::new(snapshot.clone())),
+                sweep_requested: Arc::new(AtomicBool::new(false)),
+            };
+            let (tx, rx) = unbounded();
+            spawn_watch(
+                WatchSetup {
+                    index,
+                    scanner,
+                    watcher,
+                    token,
+                    root: root.clone(),
+                    index_path: index_path.clone(),
+                    vid,
                 },
-                |_, cx| cx.new(|cx| SearchDemo::new(index, source, cx)),
-            )
-            .expect("open window");
-        window
-            .update(cx, |view, window, cx| {
-                let handle = view.input.read(cx).focus_handle.clone();
-                window.focus(&handle);
-                cx.activate(true);
+                handle.clone(),
+                tx,
+            );
+            Some((handle, rx))
+        }
+        Err(e) => {
+            eprintln!("everyfiles demo: no watcher ({e}); changes need ⌘R");
+            None
+        }
+    };
+    let opened = Opened {
+        index: snapshot,
+        source,
+        root,
+        index_path,
+        backend,
+        watch,
+    };
+
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("backspace", Backspace, None),
+                KeyBinding::new("delete", Delete, None),
+                KeyBinding::new("left", Left, None),
+                KeyBinding::new("right", Right, None),
+                KeyBinding::new("shift-left", SelectLeft, None),
+                KeyBinding::new("shift-right", SelectRight, None),
+                KeyBinding::new("home", Home, None),
+                KeyBinding::new("end", End, None),
+                KeyBinding::new("cmd-a", SelectAll, None),
+                KeyBinding::new("cmd-v", Paste, None),
+                KeyBinding::new("cmd-c", Copy, None),
+                KeyBinding::new("cmd-x", Cut, None),
+                KeyBinding::new("escape", Clear, None),
+                KeyBinding::new("cmd-p", TogglePinyin, None),
+                KeyBinding::new("cmd-r", Reindex, None),
+                KeyBinding::new("cmd-q", Quit, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
             })
-            .expect("focus the search box");
-    });
+            .detach();
+
+            let bounds = Bounds::centered(None, size(px(960.), px(640.)), cx);
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("everyfiles".into()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|cx| SearchDemo::new(opened, cx)),
+                )
+                .expect("open window");
+            window
+                .update(cx, |view, window, cx| {
+                    let handle = view.input.read(cx).focus_handle.clone();
+                    window.focus(&handle);
+                    cx.activate(true);
+                })
+                .expect("focus the search box");
+        });
 }

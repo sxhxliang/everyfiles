@@ -1685,6 +1685,7 @@ name = "everyfiles-gpui-demo"
 version = "0.1.0"
 dependencies = [
  "everyfiles",
+ "futures",
  "gpui",
  "unicode-segmentation",
 ]

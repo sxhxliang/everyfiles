@@ -50,7 +50,7 @@ everyfiles/
 
 依赖方向严格单向：后端 → core；门面 → core + generic + 本机原生后端（通过 `[target.'cfg(...)'.dependencies]` 声明）；CLI → 门面 + testkit。
 
-`demos/gpui` 是一个用 gpui 写的演示窗口，有自己的 `[workspace]`，故意不做仓库 workspace 的成员：gpui 的依赖树很大，Linux 上还要显示服务器，不该进入引擎的测试矩阵和 `xcheck`。它只通过门面 crate 使用引擎（开启 `pinyin` 特性），在它的目录下 `cargo run --release -- <dir>` 运行，见 `demos/gpui/README.md`。
+`demos/gpui` 是一个用 gpui 写的演示窗口，有自己的 `[workspace]`，故意不做仓库 workspace 的成员：gpui 的依赖树很大，Linux 上还要显示服务器，不该进入引擎的测试矩阵和 `xcheck`。它只通过门面 crate 使用引擎（开启 `pinyin` 特性），用后端监听器保持索引实时，在它的目录下 `cargo run --release -- <dir>` 运行，见 `demos/gpui/README.md`。
 
 每个平台后端把全部平台代码放在 `imp.rs` 后面，用 `#[cfg(target_os = "...")] mod imp;` 门控，所以每个 crate 在任何宿主机上都能编译（在非目标平台上编译成空库）。这正是 `cargo xtask xcheck` 能在 Mac 上对 Linux/Windows 后端做类型检查的前提。
 

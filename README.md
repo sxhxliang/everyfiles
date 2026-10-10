@@ -90,7 +90,8 @@ path on any host.
 
 A small GUI over the same engine lives in `demos/gpui` (Zed's gpui):
 `cd demos/gpui && cargo run --release -- ~/Documents` opens a window that
-searches as you type, with a pinyin toggle. It is a standalone crate, not a
+searches as you type, with a pinyin toggle, and follows filesystem changes
+live through the backend's watcher. It is a standalone crate, not a
 workspace member, so the engine's build and tests never pull in gpui.
 
 Queries are case-insensitive substrings by default. A query containing `*` or
