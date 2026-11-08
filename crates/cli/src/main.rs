@@ -1,6 +1,7 @@
 //! `everyfiles` — instant filename search over an in-memory index.
 
 mod bench;
+mod clean;
 mod fmt;
 
 use std::io::Write;
@@ -195,6 +196,8 @@ enum Cmd {
     },
     /// List the backends compiled into this binary.
     Backends,
+    /// CleanMyMac-style system cleaner and developer suite.
+    Clean(clean::CleanArgs),
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -558,6 +561,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             threads: cli.threads,
             bopts,
         }),
+        Cmd::Clean(args) => clean::run_clean(args),
     }
 }
 

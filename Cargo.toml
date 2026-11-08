@@ -9,6 +9,7 @@ members = [
     "crates/backend-linux",
     "crates/backend-windows",
     "crates/cli",
+    "crates/cleaner",
     "xtask",
 ]
 
@@ -27,6 +28,7 @@ everyfiles-backend-generic = { path = "crates/backend-generic" }
 everyfiles-backend-macos = { path = "crates/backend-macos" }
 everyfiles-backend-linux = { path = "crates/backend-linux" }
 everyfiles-backend-windows = { path = "crates/backend-windows" }
+everyfiles-cleaner = { path = "crates/cleaner" }
 
 memchr = "2.8"
 rayon = "1.12"
@@ -50,6 +52,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 libc = "0.2"
 rustix = { version = "1.1", features = ["fs"] }
+trash = "5.2"
+ratatui = "0.29"
+crossterm = "0.28"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

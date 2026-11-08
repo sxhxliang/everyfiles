@@ -80,7 +80,20 @@ $B verify ~/Code                      # differential check against a naive walk
 $B bench  --records 1000000 --path ~/Code   # build/save/load, substring, glob, filter, sort; plus real scans
 scripts/bench.sh ~/Code                  # same, with system info; see docs/benchmarks.zh-CN.md
 $B backends                           # what this binary was built with
+
+# Mac Cleaner & Developer Suite (CleanMyMac-style)
+$B clean ui                           # interactive full-color terminal dashboard
+$B clean scan                         # one-shot smart scan across all junk categories
+$B clean apply                        # safely move recommended junk to macOS Trash
+$B clean dev --projects               # inspect dormant node_modules / target / .venv
+$B clean dev --git                    # inspect and compact bloated Git repositories
+$B clean apps --list                  # list installed apps sorted by full disk footprint
+$B clean uninstall <app>              # deep uninstaller removing .app + all Library data
+$B clean duplicates <path>            # xxHash3 multi-tier duplicate file finder
+$B clean space <path>                 # DaisyDisk-style interactive visual disk space lens
 ```
+
+See [**`docs/cleaner.zh-CN.md`**](docs/cleaner.zh-CN.md) for the complete cleaner user guide, safety design, and examples.
 
 Output formats: `human` (default on a tty), `tsv` (default when piped),
 `jsonl`, `json`, `null`. `--index <path>` overrides the cache location

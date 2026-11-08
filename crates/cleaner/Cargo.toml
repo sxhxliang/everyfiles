@@ -1,0 +1,24 @@
+[package]
+name = "everyfiles-cleaner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CleanMyMac-style system cleaner and developer environment optimizer built on everyfiles"
+
+[dependencies]
+everyfiles.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+trash.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+libc.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
