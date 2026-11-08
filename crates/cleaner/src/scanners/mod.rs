@@ -16,15 +16,31 @@ use walkdir::WalkDir;
 
 use crate::domain::{CleanCategory, CleanGroup, ScanSummary};
 
+#[cfg(unix)]
+fn file_allocated_size(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let allocated = meta.blocks().saturating_mul(512);
+    if allocated > 0 {
+        std::cmp::min(meta.len(), allocated)
+    } else {
+        meta.len()
+    }
+}
+
+#[cfg(not(unix))]
+fn file_allocated_size(meta: &fs::Metadata) -> u64 {
+    meta.len()
+}
+
 /// Calculate size and file count of a file or directory tree.
 pub fn dir_size_and_count(path: &Path) -> (u64, usize) {
     if !path.exists() {
         return (0, 0);
     }
 
-    if let Ok(meta) = fs::symlink_metadata(path) {
+    if let Ok(meta) = fs::metadata(path) {
         if !meta.is_dir() {
-            return (meta.len(), 1);
+            return (file_allocated_size(&meta), 1);
         }
     } else {
         return (0, 0);
@@ -36,7 +52,7 @@ pub fn dir_size_and_count(path: &Path) -> (u64, usize) {
     for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
         if let Ok(meta) = entry.metadata() {
             if meta.is_file() {
-                total_size = total_size.saturating_add(meta.len());
+                total_size = total_size.saturating_add(file_allocated_size(&meta));
                 file_count = file_count.saturating_add(1);
             }
         }

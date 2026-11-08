@@ -407,20 +407,47 @@ fn scan_jetbrains(home: &Path) -> CleanItem {
 
 fn scan_docker(home: &Path) -> Option<CleanItem> {
     let docker_vm_candidates = [
-        home.join("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"),
-        home.join("Library/Containers/com.docker.docker/Data/vms/0/Docker.raw"),
-        home.join("Library/Containers/com.docker.docker/Data/vms"),
+        (
+            "Docker Desktop 虚拟机磁盘",
+            home.join("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"),
+        ),
+        (
+            "Docker Desktop 虚拟机",
+            home.join("Library/Containers/com.docker.docker/Data/vms/0/Docker.raw"),
+        ),
+        (
+            "Docker Desktop 虚拟机目录",
+            home.join("Library/Containers/com.docker.docker/Data/vms"),
+        ),
+        ("OrbStack 容器虚拟机磁盘", home.join(".orbstack/data")),
+        (
+            "OrbStack 数据目录",
+            home.join("Library/Group Containers/HUAQ24HBR6.dev.orbstack/data"),
+        ),
+        ("Colima 虚拟机镜像", home.join(".colima")),
+        (
+            "Podman 容器存储",
+            home.join(".local/share/containers/storage"),
+        ),
+        (
+            "Docker Desktop WSL2 (Windows)",
+            home.join("AppData\\Local\\Docker\\wsl\\data\\ext4.vhdx"),
+        ),
+        (
+            "Linux Docker 运行时",
+            std::path::PathBuf::from("/var/lib/docker"),
+        ),
     ];
 
-    for p in &docker_vm_candidates {
+    for (label, p) in &docker_vm_candidates {
         if p.exists() {
             let (sz, count) = dir_size_and_count(p);
             if sz > 0 {
                 return Some(CleanItem::new(
                     "dev_docker",
                     CleanCategory::DevJunk,
-                    "Docker 虚拟机磁盘映像",
-                    "Docker Desktop 容器运行底座虚拟磁盘 (提示: 可运行 docker system prune 释放内部空间)",
+                    *label,
+                    "Docker / OrbStack 容器运行底座虚拟磁盘 (提示: 可启动后运行 docker system prune 释放内部空间)",
                     p.clone(),
                     sz,
                     count,

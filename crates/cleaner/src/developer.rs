@@ -227,16 +227,45 @@ impl DeveloperManager {
             cmd.arg("--volumes");
         }
 
-        let out = cmd
-            .output()
-            .map_err(|e| format!("Failed to execute docker: {e}. (Is Docker running?)"))?;
+        let out = cmd.output().map_err(|e| {
+            format!("无法执行 docker 命令: {e}。(请确认系统中已安装 Docker 或 OrbStack)")
+        })?;
 
         if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             Ok(stdout)
         } else {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            Err(format!("docker system prune failed: {stderr}"))
+            if stderr.contains("connect: no such file or directory")
+                || stderr.contains("Is the docker daemon running")
+                || stderr.contains("failed to connect to the docker API")
+                || stderr.contains("connection refused")
+            {
+                let mut hint =
+                    String::from("Docker 守护进程当前未运行（未能连接到 Docker API）。\n");
+                #[cfg(target_os = "macos")]
+                {
+                    if Path::new("/Applications/OrbStack.app").exists() {
+                        hint.push_str("  💡 检测到本机使用的是 OrbStack，后台服务当前未启动。\n  👉 请先在终端运行 `open -a OrbStack` 启动它，待就绪后再执行此清理。");
+                    } else if Path::new("/Applications/Docker.app").exists() {
+                        hint.push_str("  💡 检测到本机使用的是 Docker Desktop，后台服务当前未启动。\n  👉 请先在终端运行 `open -a Docker` 启动它，待就绪后再执行此清理。");
+                    } else {
+                        hint.push_str("  👉 请先启动 Docker Desktop 或 OrbStack 应用后再试。");
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    hint.push_str(
+                        "  👉 请运行 `sudo systemctl start docker` 启动 Docker 服务后重试。",
+                    );
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    hint.push_str("  👉 请先在 Windows 中启动 Docker Desktop 后重试。");
+                }
+                return Err(hint);
+            }
+            Err(format!("docker system prune 执行失败: {stderr}"))
         }
     }
 

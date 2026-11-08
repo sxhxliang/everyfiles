@@ -510,12 +510,12 @@ fn run_dev(
 
     // 4. Docker Reclaim
     if docker {
-        println!("\n🐳 正在执行 Docker Desktop 深度空间回收...");
+        println!("\n🐳 正在排查并执行 Docker / 容器环境空间回收...");
         match DeveloperManager::docker_system_prune(true, true) {
             Ok(msg) => {
-                println!("  ✅ Docker 回收输出:\n{msg}");
+                println!("  ✅ Docker 回收完成:\n{msg}");
             }
-            Err(e) => eprintln!("  ❌ Docker 回收失败: {e}"),
+            Err(e) => eprintln!("  ⚠️  {e}"),
         }
     }
 
